@@ -2,8 +2,19 @@
 
 from datetime import date
 from decimal import Decimal
+from typing import Annotated
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+
+from app.models.enums import CropType
+
+
+def normalize_crop(value: object) -> object:
+    """Trim and lowercase crop query values before enum validation."""
+    return value.strip().lower() if isinstance(value, str) else value
+
+
+CropQuery = Annotated[CropType, BeforeValidator(normalize_crop)]
 
 
 class MarketRead(BaseModel):
