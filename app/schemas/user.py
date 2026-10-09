@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from app.utils.phone import normalize_phone
 
 
-class UserRead(BaseModel):
+class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -17,8 +17,13 @@ class UserRead(BaseModel):
     email: EmailStr | None
     role: str
     must_change_password: bool
-    is_disabled: bool
     created_at: datetime
+
+
+class UserRead(UserOut):
+    """Extended account projection reserved for administrative listings."""
+
+    is_disabled: bool
 
 
 class AdminCreate(BaseModel):
