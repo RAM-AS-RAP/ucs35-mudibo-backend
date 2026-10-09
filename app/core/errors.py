@@ -87,6 +87,14 @@ def install_error_handlers(app: FastAPI) -> None:
         del request
         return JSONResponse(status_code=exc.status_code, content=error_body(exc.code, exc.message))
 
+    @app.exception_handler(NotImplementedError)
+    async def not_implemented_handler(request: Request, exc: NotImplementedError) -> JSONResponse:
+        del request
+        del exc
+        return JSONResponse(
+            status_code=501, content=error_body("not_implemented", "This endpoint is not implemented yet")
+        )
+
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
         del request
