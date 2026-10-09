@@ -5,11 +5,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import must_change_password
+from app.core.dependencies import get_current_user
 from app.db import get_db
 from app.services import price_service
 
-router = APIRouter(prefix="/prices", tags=["prices"], dependencies=[Depends(must_change_password)])
+router = APIRouter(prefix="/prices", tags=["prices"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/current")
