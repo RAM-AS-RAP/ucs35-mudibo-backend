@@ -130,6 +130,8 @@ python -m scripts.seed_admin
 
 The script exits without changes if a super admin already exists. Remove `SEED_ADMIN_PASSWORD` from `.env` after a successful seed. Do not run the price seed script until its FEWS file and product mappings have been configured in `scripts/seed_prices.py`.
 
+Farmer/buyer registration and password changes require 8-128 characters, including an uppercase letter, lowercase letter, digit, and non-whitespace symbol. Login continues to accept existing passwords so users are not locked out by policy changes.
+
 ## 6. Run the API
 
 With the virtual environment active, from the repository root, use the same command on Windows, macOS, and Linux:
