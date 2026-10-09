@@ -9,7 +9,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app.db import SessionLocal
+from app.db import get_sessionmaker
 
 # TODO: map source JSON filenames to Nairobi, Kisumu, Mombasa, or Nakuru.
 FILE_MARKET_MAP: dict[str, str] = {}
@@ -32,7 +32,7 @@ def records_from_json(payload: Any) -> list[dict[str, Any]]:
 
 async def import_folder(folder: Path) -> None:
     """Validate and upsert configured FEWS records; mappings must be filled in first."""
-    async with SessionLocal() as session:
+    async with get_sessionmaker()() as session:
         for file_path in sorted(folder.glob("*.json")):
             market = FILE_MARKET_MAP.get(file_path.name)
             if market is None:
