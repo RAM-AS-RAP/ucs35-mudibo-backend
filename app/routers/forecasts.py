@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import must_change_password, require_role
+from app.core.dependencies import get_current_user, require_role
 from app.db import get_db
 from app.models.enums import UserRole
 from app.services import forecast_service
@@ -13,7 +13,7 @@ from app.services import forecast_service
 router = APIRouter(
     prefix="/forecasts",
     tags=["forecasts"],
-    dependencies=[Depends(must_change_password), Depends(require_role(UserRole.FARMER))],
+    dependencies=[Depends(get_current_user), Depends(require_role(UserRole.FARMER))],
 )
 
 
