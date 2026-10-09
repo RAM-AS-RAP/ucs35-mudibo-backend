@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -186,7 +187,17 @@ async def initiate_payment(session: AsyncSession, order_id: UUID, buyer: User, i
         environment="sandbox",
     )
     session.add(payment)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        # payments_one_open_per_order_idx allows one initiating/initiated payment per order.
+        if "payments_one_open_per_order_idx" in str(exc):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "payment_in_progress", "message": "A payment for this order is already in progress"},
+            ) from exc
+        raise
     await session.refresh(payment)
     session.add(
         PaymentEvent(
