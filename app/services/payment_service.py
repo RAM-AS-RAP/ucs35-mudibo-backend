@@ -19,12 +19,16 @@ from app.models.user import User
 
 
 def callback_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Extract the standard Daraja STK callback and metadata fields."""
-    callback = payload.get("Body", {}).get("stkCallback", {})
-    metadata = callback.get("CallbackMetadata", {}).get("Item", [])
-    values = {
-        str(item.get("Name")): item.get("Value") for item in metadata if isinstance(item, dict) and "Name" in item
-    }
+    """Extract the standard Daraja STK callback and metadata fields, tolerating malformed shapes."""
+    body = payload.get("Body")
+    callback = body.get("stkCallback") if isinstance(body, dict) else None
+    if not isinstance(callback, dict):
+        return {}, {}
+    metadata = callback.get("CallbackMetadata")
+    items = metadata.get("Item") if isinstance(metadata, dict) else None
+    if not isinstance(items, list):
+        items = []
+    values = {str(item.get("Name")): item.get("Value") for item in items if isinstance(item, dict) and "Name" in item}
     return callback, values
 
 
@@ -32,6 +36,8 @@ async def handle_callback(session: AsyncSession, payload: dict[str, Any]) -> Non
     """Persist every callback and apply a matching state transition at most once."""
     callback, metadata = callback_fields(payload)
     checkout_id = callback.get("CheckoutRequestID")
+    if not isinstance(checkout_id, str):
+        checkout_id = None
     initial_event = PaymentEvent(
         payment_id=None,
         checkout_request_id=checkout_id,
