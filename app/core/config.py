@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
     cors_origins: str = ""
+    login_max_failures: int = 5
+    login_failure_window_minutes: int = 15
     mpesa_env: str = "sandbox"
     mpesa_base_url: str = "https://sandbox.safaricom.co.ke"
     mpesa_consumer_key: str = ""
@@ -38,6 +40,27 @@ class Settings(BaseSettings):
     seed_admin_phone: str = ""
     seed_admin_email: str = ""
     seed_admin_password: str = ""
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def validate_jwt_secret(cls, value: str) -> str:
+        if len(value) < 32:
+            raise ValueError("JWT_SECRET must contain at least 32 characters")
+        return value
+
+    @field_validator("access_token_expire_minutes")
+    @classmethod
+    def validate_access_token_expiry(cls, value: int) -> int:
+        if not 5 <= value <= 1440:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be between 5 and 1440")
+        return value
+
+    @field_validator("login_max_failures", "login_failure_window_minutes")
+    @classmethod
+    def validate_positive_login_limit(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Login throttle settings must be positive")
+        return value
 
     @field_validator("mpesa_env")
     @classmethod

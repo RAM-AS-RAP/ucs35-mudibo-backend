@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import must_change_password, require_role
+from app.core.dependencies import get_current_user, require_role
 from app.db import get_db
 from app.models.enums import UserRole
 from app.models.user import User
@@ -15,7 +15,7 @@ from app.schemas.payment import PaymentRead
 from app.services import order_service
 from app.services.payment_service import initiate_payment
 
-router = APIRouter(prefix="/orders", tags=["orders"], dependencies=[Depends(must_change_password)])
+router = APIRouter(prefix="/orders", tags=["orders"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("", status_code=201, response_model=OrderRead)

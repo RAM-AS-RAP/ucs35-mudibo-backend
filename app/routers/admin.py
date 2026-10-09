@@ -6,14 +6,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import must_change_password, require_role, require_super_admin
+from app.core.dependencies import get_current_user, require_role, require_super_admin
 from app.db import get_db
 from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.user import AdminCreate
 from app.services import admin_service, listing_service
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(must_change_password)])
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("/admins", status_code=201)

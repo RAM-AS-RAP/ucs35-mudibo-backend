@@ -37,3 +37,54 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/admin/forecast-accuracy` | Admin | Optional market, crop, horizon. | Accuracy rows and pooled summary. |
 
 Services marked TODO require database migrations and schema constraints before their behavior is enabled.
+
+## Authentication details
+
+`POST /auth/register/farmer` and `POST /auth/register/buyer` accept a JSON body with `name`, `phone_number`, optional `email`, and `password`. Unknown fields are rejected. The role is assigned by the route.
+
+Registration passwords and `new_password` on `/auth/change-password` must be 8-128 characters and include at least one uppercase letter, one lowercase letter, one digit, and one non-whitespace symbol. Login accepts existing passwords without reapplying the creation policy.
+
+```json
+{
+	"name": "Amina Farmer",
+	"phone_number": "0712345678",
+	"email": "amina@example.com",
+	"password": "a-long-private-password"
+}
+```
+
+Successful registration returns `201` and a user projection containing `id`, `name`, normalized `phone_number`, `email`, `role`, `must_change_password`, and `created_at`. It never includes a password hash or disabled-account details.
+
+`POST /auth/login` accepts `identifier` (email or Kenyan phone number) and `password`. A successful response is `200`:
+
+```json
+{
+	"access_token": "<signed-token>",
+	"token_type": "bearer",
+	"expires_in": 3600,
+	"role": "farmer",
+	"must_change_password": false
+}
+```
+
+`POST /auth/change-password` accepts `current_password` and `new_password`, returns `204`, and rejects a new password equal to the current password. `GET /auth/me` returns the current user projection.
+
+For example, a password missing an uppercase letter and symbol returns `422` with safe field-specific details:
+
+```json
+{
+	"error": {
+		"code": "validation_error",
+		"message": "Request validation failed",
+		"fields": ["password"],
+		"details": [
+			{
+				"field": "password",
+				"message": "Value error, Password must contain an uppercase letter; a symbol"
+			}
+		]
+	}
+}
+```
+
+The response describes failed rules but never includes the submitted password. Authentication error codes: `invalid_credentials` (`401`) is identical for unknown, incorrect-password, and disabled accounts; `password_change_required` (`403`) blocks other authenticated routes until the temporary password changes; `forbidden` (`403`) indicates a role or super-admin failure; `rate_limited` (`429`) covers IP and per-identifier throttles; `conflict` (`409`) is the generic duplicate-account response; `validation_error` (`422`) lists field names and safe validation details.

@@ -3,32 +3,46 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 
-settings = get_settings()
-database_url = settings.database_url
-if database_url.startswith("postgresql://"):
-    database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+_engine: AsyncEngine | None = None
+_session_factory: async_sessionmaker[AsyncSession] | None = None
 
-engine = (
-    create_async_engine(
-        database_url,
-        connect_args={"statement_cache_size": 0},
-        pool_pre_ping=True,
-    )
-    if database_url
-    else None
-)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+def get_engine() -> AsyncEngine:
+    """Create and cache the async engine on first database use."""
+    global _engine
+    if _engine is None:
+        database_url = get_settings().database_url
+        if not database_url:
+            raise RuntimeError("DATABASE_URL must be configured before database access")
+        if database_url.startswith(("postgresql://", "postgres://")):
+            database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        _engine = create_async_engine(
+            database_url,
+            pool_size=5,
+            max_overflow=5,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"statement_cache_size": 0},
+        )
+    return _engine
+
+
+def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    """Create and cache a session factory without connecting to the database."""
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+    return _session_factory
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
-    """Yield a database session, failing clearly when configuration is missing."""
-    if engine is None:
-        raise RuntimeError("DATABASE_URL must be configured before database access")
-    async with SessionLocal() as session:
+    """Yield a session, creating the engine lazily on first use."""
+    async with get_sessionmaker()() as session:
         yield session
 
 

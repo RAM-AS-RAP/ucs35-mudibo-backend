@@ -1,0 +1,32 @@
+# Delete this workflow after its result is recorded in docs/decisions.md.
+name: FEWS API runner probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe with curl default user agent
+        shell: bash
+        run: |
+          url='https://fdw.fews.net/api/marketpricefacts/?product=maize&country=Kenya&market=57999&price_type=Wholesale&start_date=2026-01-01&end_date=2026-08-01&format=json'
+          status=$(curl -sS -o /tmp/body-default.txt -w "%{http_code}" "$url")
+          echo "Default user agent HTTP status: $status"
+          head -c 300 /tmp/body-default.txt
+          printf '\n'
+          echo "FEWS probe, default user agent: HTTP $status" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Probe with browser-like user agent
+        shell: bash
+        run: |
+          url='https://fdw.fews.net/api/marketpricefacts/?product=maize&country=Kenya&market=57999&price_type=Wholesale&start_date=2026-01-01&end_date=2026-08-01&format=json'
+          status=$(curl -sS -o /tmp/body-browser.txt -w "%{http_code}" \
+            -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36' \
+            -H 'Accept: application/json' \
+            "$url")
+          echo "Browser-like user agent HTTP status: $status"
+          head -c 300 /tmp/body-browser.txt
+          printf '\n'
+          echo "FEWS probe, browser-like user agent: HTTP $status" >> "$GITHUB_STEP_SUMMARY"

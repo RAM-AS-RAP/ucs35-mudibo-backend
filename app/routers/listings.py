@@ -7,13 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, must_change_password, require_role
+from app.core.dependencies import get_current_user, require_role
 from app.db import get_db
 from app.models.enums import UserRole
 from app.models.user import User
 from app.services import listing_service
 
-router = APIRouter(prefix="/listings", tags=["listings"], dependencies=[Depends(must_change_password)])
+router = APIRouter(prefix="/listings", tags=["listings"], dependencies=[Depends(get_current_user)])
 
 
 @router.post("", status_code=201)
