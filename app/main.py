@@ -1,13 +1,17 @@
 """FastAPI application factory and versioned router registration."""
 
+from typing import Any
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from starlette.responses import JSONResponse
+from sqlalchemy import text
+from starlette.responses import JSONResponse, Response
 
 from app.core.config import get_settings
 from app.core.errors import error_body, install_error_handlers
+from app.db import get_engine
 from app.routers import admin, auth, forecasts, listings, markets, orders, payments, prices
 
 
@@ -16,7 +20,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     docs_enabled = settings.app_env != "production"
     application = FastAPI(
-        title="Mudibo Crop Price API",
+        title="AgriSence Backend API",
         version="1.0.0",
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
@@ -27,7 +31,7 @@ def create_app() -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"],
     )
@@ -40,8 +44,25 @@ def create_app() -> FastAPI:
 
     install_error_handlers(application)
 
+    @application.middleware("http")
+    async def security_headers(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     @application.get("/api/v1/health", tags=["health"])
     async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @application.get("/api/v1/health/db", tags=["health"])
+    async def database_health() -> Any:
+        try:
+            async with get_engine().connect() as connection:
+                await connection.execute(text("select 1"))
+        except Exception:
+            return JSONResponse(status_code=503, content={"status": "degraded"})
         return {"status": "ok"}
 
     for route in (
