@@ -56,3 +56,61 @@ async def test_current_prices_rejects_unsupported_crops_before_service_call(api_
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
     assert not called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("market", "crop", "months", "expected_market", "expected_crop", "expected_months"),
+    [
+        ("nairobi", "MAIZE", None, "Nairobi", CropType.MAIZE, 12),
+        ("NAKURU", "beans", "6", "Nakuru", CropType.BEANS, 6),
+        ("mOmBaSa", "MaIzE", "1", "Mombasa", CropType.MAIZE, 1),
+        (" Kisumu ", "BEANS", "12", "Kisumu", CropType.BEANS, 12),
+    ],
+)
+async def test_price_trends_normalizes_supported_query_values(
+    api_client, application, monkeypatch, market, crop, months, expected_market, expected_crop, expected_months
+):
+    application.dependency_overrides[get_current_user] = lambda: SimpleNamespace()
+    application.dependency_overrides[get_db] = fake_db
+    received = {}
+
+    async def price_trends(session, market, crop, months):
+        received.update(market=market, crop=crop, months=months)
+        return []
+
+    monkeypatch.setattr(price_service, "price_trends", price_trends)
+    params = {"market": market, "crop": crop}
+    if months is not None:
+        params["months"] = months
+    response = await api_client.get("/api/v1/prices/trends", params=params)
+    assert response.status_code == 200
+    assert received == {"market": expected_market, "crop": expected_crop, "months": expected_months}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"market": "Eldoret", "crop": "maize"},
+        {"market": "Nairobi", "crop": "sorghum"},
+        {"market": "Nairobi", "crop": "maize", "months": "13"},
+    ],
+)
+async def test_price_trends_rejects_unsupported_values_before_service_call(
+    api_client, application, monkeypatch, params
+):
+    application.dependency_overrides[get_current_user] = lambda: SimpleNamespace()
+    application.dependency_overrides[get_db] = fake_db
+    called = False
+
+    async def price_trends(session, market, crop, months):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(price_service, "price_trends", price_trends)
+    response = await api_client.get("/api/v1/prices/trends", params=params)
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert not called
