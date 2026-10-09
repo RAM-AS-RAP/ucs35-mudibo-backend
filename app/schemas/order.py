@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.payment import PaymentRead
+
 
 class OrderCreate(BaseModel):
     listing_id: UUID
@@ -32,4 +34,4 @@ class OrderWithPayment(OrderRead):
 
 class OrderDetail(BaseModel):
     order: OrderRead
-    latest_payment: dict[str, object] | None = None
+    latest_payment: PaymentRead | None = None
