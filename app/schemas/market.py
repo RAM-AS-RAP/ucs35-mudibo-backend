@@ -2,8 +2,39 @@
 
 from datetime import date
 from decimal import Decimal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+
+from app.models.enums import CropType
+
+
+def normalize_crop(value: object) -> object:
+    """Trim and lowercase crop query values before enum validation."""
+    return value.strip().lower() if isinstance(value, str) else value
+
+
+CropQuery = Annotated[CropType, BeforeValidator(normalize_crop)]
+
+
+def normalize_market(value: object) -> object:
+    """Normalize supported market names to their database representation."""
+    if not isinstance(value, str):
+        return value
+    market_names = {
+        "nairobi": "Nairobi",
+        "nakuru": "Nakuru",
+        "mombasa": "Mombasa",
+        "kisumu": "Kisumu",
+    }
+    normalized = value.strip().casefold()
+    if normalized not in market_names:
+        raise ValueError("Market must be Nairobi, Nakuru, Mombasa, or Kisumu")
+    return market_names[normalized]
+
+
+MarketName = Literal["Nairobi", "Nakuru", "Mombasa", "Kisumu"]
+MarketQuery = Annotated[MarketName, BeforeValidator(normalize_market)]
 
 
 class MarketRead(BaseModel):
