@@ -36,7 +36,9 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/admin/stats` | Admin | None | User, listing, order, and sandbox payment aggregates. |
 | GET | `/admin/forecast-accuracy` | Admin | Optional market, crop, horizon. | Accuracy rows and pooled summary. |
 
-Services marked TODO require database migrations and schema constraints before their behavior is enabled.
+Services marked TODO require database migrations and schema constraints before their behavior is enabled. Until they are implemented, every `/listings` and `/admin` route answers `501` with error code `not_implemented` (after the usual authentication and role checks).
+
+`crop` must be `maize` or `beans` and `horizon` must be `one_month` or `two_month`; other values return `422`. `POST /orders/{id}/pay` returns `409` with code `payment_in_progress` while an earlier payment for the same order is still open.
 
 ## Authentication details
 
@@ -49,7 +51,7 @@ Registration passwords and `new_password` on `/auth/change-password` must be 8-1
 	"name": "Amina Farmer",
 	"phone_number": "0712345678",
 	"email": "amina@example.com",
-	"password": "a-long-private-password"
+	"password": "A-long-private-passw0rd"
 }
 ```
 

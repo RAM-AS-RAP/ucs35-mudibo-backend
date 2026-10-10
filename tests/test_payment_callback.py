@@ -109,3 +109,32 @@ async def test_amount_mismatch_does_not_mark_order_paid() -> None:
     assert session.execute_calls == 0
     assert order.status == OrderStatus.PENDING_PAYMENT
     assert len(session.events) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"Body": "not-an-object"},
+        {"Body": {"stkCallback": "not-an-object"}},
+        {"Body": {"stkCallback": {"CheckoutRequestID": {"nested": 1}, "CallbackMetadata": "not-an-object"}}},
+        {"Body": {"stkCallback": {"CallbackMetadata": {"Item": "not-a-list"}}}},
+    ],
+)
+async def test_malformed_callback_is_recorded_without_error(payload) -> None:
+    session = FakeSession()
+    await handle_callback(session, payload)
+    assert len(session.events) == 1
+    assert session.events[0].checkout_request_id is None
+    assert session.scalar_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_malformed_callback_body_is_acknowledged(api_client, application, monkeypatch) -> None:
+    session = FakeSession()
+    application.dependency_overrides[get_db] = override_db(session)
+    monkeypatch.setattr(payment_router, "get_settings", lambda: SimpleNamespace(mpesa_callback_token="expected"))
+    response = await api_client.post("/api/v1/payments/callback/expected", json={"Body": "not-an-object"})
+    assert response.status_code == 200
+    assert response.json() == {"ResultCode": 0, "ResultDesc": "Accepted"}

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models import Base
 from app.models.enums import CropType, ListingStatus, UserRole, crop_type_type, listing_status_type, user_role_type
+from app.models.market import MarketLocation
 
 
 class ProduceListing(Base):
@@ -20,7 +21,9 @@ class ProduceListing(Base):
     farmer_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
     farmer_role: Mapped[UserRole] = mapped_column(user_role_type, nullable=False, server_default=text("'farmer'"))
     crop: Mapped[CropType] = mapped_column(crop_type_type, nullable=False)
-    market: Mapped[str] = mapped_column(ForeignKey("market_locations.market_name"), nullable=False)
+    # Reference the mapped column rather than a "table.column" string so market_locations is
+    # always registered in the metadata when this model is used; otherwise flushes fail.
+    market: Mapped[str] = mapped_column(ForeignKey(MarketLocation.market_name), nullable=False)
     quantity_available: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     unit: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'kg'"))
     price_per_unit: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
