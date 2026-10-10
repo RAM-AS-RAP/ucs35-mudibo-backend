@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -18,12 +19,16 @@ from app.models.user import User
 
 
 def callback_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Extract the standard Daraja STK callback and metadata fields."""
-    callback = payload.get("Body", {}).get("stkCallback", {})
-    metadata = callback.get("CallbackMetadata", {}).get("Item", [])
-    values = {
-        str(item.get("Name")): item.get("Value") for item in metadata if isinstance(item, dict) and "Name" in item
-    }
+    """Extract the standard Daraja STK callback and metadata fields, tolerating malformed shapes."""
+    body = payload.get("Body")
+    callback = body.get("stkCallback") if isinstance(body, dict) else None
+    if not isinstance(callback, dict):
+        return {}, {}
+    metadata = callback.get("CallbackMetadata")
+    items = metadata.get("Item") if isinstance(metadata, dict) else None
+    if not isinstance(items, list):
+        items = []
+    values = {str(item.get("Name")): item.get("Value") for item in items if isinstance(item, dict) and "Name" in item}
     return callback, values
 
 
@@ -31,6 +36,8 @@ async def handle_callback(session: AsyncSession, payload: dict[str, Any]) -> Non
     """Persist every callback and apply a matching state transition at most once."""
     callback, metadata = callback_fields(payload)
     checkout_id = callback.get("CheckoutRequestID")
+    if not isinstance(checkout_id, str):
+        checkout_id = None
     initial_event = PaymentEvent(
         payment_id=None,
         checkout_request_id=checkout_id,
@@ -186,7 +193,17 @@ async def initiate_payment(session: AsyncSession, order_id: UUID, buyer: User, i
         environment="sandbox",
     )
     session.add(payment)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        # payments_one_open_per_order_idx allows one initiating/initiated payment per order.
+        if "payments_one_open_per_order_idx" in str(exc):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "payment_in_progress", "message": "A payment for this order is already in progress"},
+            ) from exc
+        raise
     await session.refresh(payment)
     session.add(
         PaymentEvent(

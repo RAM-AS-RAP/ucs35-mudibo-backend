@@ -32,30 +32,33 @@ async def create_order(session: AsyncSession, buyer: User, listing_id: UUID, qua
     from app.models.order import Order
 
     settings = get_settings()
-    async with session.begin():
-        listing = await session.scalar(select(ProduceListing).where(ProduceListing.id == listing_id).with_for_update())
-        if listing is None or listing.status != ListingStatus.ACTIVE or listing.quantity_available < quantity:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "stock_unavailable", "message": "Listing is unavailable or has insufficient stock"},
-            )
-        listing.quantity_available -= quantity
-        if listing.quantity_available == 0:
-            listing.status = ListingStatus.SOLD_OUT
-        reference = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(8))
-        order = Order(
-            reference=reference,
-            listing_id=listing.id,
-            buyer_id=buyer.id,
-            buyer_role=UserRole.BUYER,
-            quantity=quantity,
-            unit_price=listing.price_per_unit,
-            total_amount=calculate_total(quantity, listing.price_per_unit),
-            status=OrderStatus.PENDING_PAYMENT,
-            expires_at=datetime.now(UTC) + timedelta(minutes=settings.order_expiry_minutes),
+    # The request session already has a transaction open (the auth dependency queried through it),
+    # so session.begin() would raise. The row lock, stock decrement, and order insert all run in
+    # that transaction and become durable together in the single commit below; if anything fails
+    # before it, closing the request session rolls all of it back.
+    listing = await session.scalar(select(ProduceListing).where(ProduceListing.id == listing_id).with_for_update())
+    if listing is None or listing.status != ListingStatus.ACTIVE or listing.quantity_available < quantity:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "stock_unavailable", "message": "Listing is unavailable or has insufficient stock"},
         )
-        session.add(order)
-        await session.flush()
+    listing.quantity_available -= quantity
+    if listing.quantity_available == 0:
+        listing.status = ListingStatus.SOLD_OUT
+    reference = "".join(secrets.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(8))
+    order = Order(
+        reference=reference,
+        listing_id=listing.id,
+        buyer_id=buyer.id,
+        buyer_role=UserRole.BUYER,
+        quantity=quantity,
+        unit_price=listing.price_per_unit,
+        total_amount=calculate_total(quantity, listing.price_per_unit),
+        status=OrderStatus.PENDING_PAYMENT,
+        expires_at=datetime.now(UTC) + timedelta(minutes=settings.order_expiry_minutes),
+    )
+    session.add(order)
+    await session.commit()
     await session.refresh(order)
     return order
 

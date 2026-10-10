@@ -26,4 +26,4 @@ async def get_forecast(
     horizon: HorizonQuery,
     session: AsyncSession = Depends(get_db),
 ) -> Any:
-    return await forecast_service.latest_forecast(session, market, crop, horizon)
+    return await forecast_service.latest_forecast(session, market, crop.value, horizon.value)

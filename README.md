@@ -41,12 +41,14 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install the API dependencies in the activated environment on any platform:
+Install the dependencies in the activated environment on any platform. `requirements-dev.txt` installs the pinned runtime packages from `requirements.txt` plus the test and lint tools:
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 ```
+
+A deployment that only runs the API needs `requirements.txt` alone.
 
 ## 3. Configure the environment
 
@@ -162,9 +164,17 @@ ruff format --check app scripts tests
 
 Database tests are marked `db`, skipped by default, and refuse to run when `APP_ENV=production`. The normal test suite uses fake sessions and does not connect to Supabase.
 
+To run the database tests, point `DATABASE_URL` at a migrated local database (never a shared or hosted one) and opt in:
+
+```bash
+RUN_DB_TESTS=1 python -m pytest -q -m db
+```
+
+In Windows PowerShell, set the variable first with `$env:RUN_DB_TESTS = "1"`. Each database test runs inside a transaction that is rolled back, so no rows are left behind.
+
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, order operations, and payment callback handling have service implementations. Listing and admin service operations remain placeholders; those routes are visible in Swagger but are not yet operational. Forecast and price data must be populated by the separate ML pipeline or the configured FEWS import before they return useful results.
+Authentication, health checks, market/price/forecast reads, order operations, and payment callback handling have service implementations. Listing and admin service operations remain placeholders; those routes are visible in Swagger but respond with `501 Not Implemented`. Because listings cannot yet be created through the API, the order and payment routes can only be exercised against listing rows inserted directly into the database. Forecast and price data must be populated by the separate ML pipeline or the configured FEWS import before they return useful results.
 
 ## Production start
 

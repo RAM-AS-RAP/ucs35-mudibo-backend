@@ -15,7 +15,7 @@ router = APIRouter(prefix="/prices", tags=["prices"], dependencies=[Depends(get_
 
 @router.get("/current")
 async def current_prices(crop: CropQuery, session: AsyncSession = Depends(get_db)) -> list[Any]:
-    return await price_service.current_prices(session, crop)
+    return await price_service.current_prices(session, crop.value)
 
 
 @router.get("/trends")
@@ -25,4 +25,4 @@ async def price_trends(
     months: int = Query(default=12, ge=1, le=12),
     session: AsyncSession = Depends(get_db),
 ) -> list[Any]:
-    return await price_service.price_trends(session, market, crop, months)
+    return await price_service.price_trends(session, market, crop.value, months)
