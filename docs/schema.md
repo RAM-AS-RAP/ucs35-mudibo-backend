@@ -33,8 +33,22 @@ Named indexes are `users_email_lower_unique_idx`, `users_one_super_admin_idx`, `
 
 ## Access and jobs
 
-RLS is enabled on all eight tables with no policies and without `FORCE ROW LEVEL SECURITY`. Data API roles `anon` and `authenticated` have no table, sequence, or function privileges. The backend connects as the table owner. The public `listing-images` Storage bucket accepts JPEG and PNG files up to 5 MiB; uploads are performed by the backend service role.
+RLS is enabled on all eight tables without `FORCE ROW LEVEL SECURITY`. Data API roles `anon` and `authenticated` have no table, sequence, or function privileges or RLS policies. The `pipeline_writer` role has policies only for select, insert, and update on `market_locations`, `market_prices`, and `forecasts`, as detailed below. The backend connects as the table owner. The public `listing-images` Storage bucket accepts JPEG and PNG files up to 5 MiB; uploads are performed by the backend service role.
 
 The `expire-stale-orders` pg_cron job runs every minute. `expire_stale_orders()` expires pending orders, times out their open payment attempts, restores reserved stock, and reactivates sold-out listings. Daraja STK Push Query reconciliation remains in the backend because PostgreSQL cannot call Daraja.
 
 The separate ML repository's monthly pipeline writes `market_prices` and `forecasts`. This API reads those tables/views and never loads a model or computes predictions.
+
+## Pipeline role
+
+Migration `20261010000100_pipeline_writer_role.sql` creates the non-superuser, non-owner `pipeline_writer` login with RLS enabled and no RLS bypass. Its only object privileges are:
+
+| Object | Allowed privileges |
+| --- | --- |
+| `market_locations` | `SELECT` |
+| `market_prices` | `SELECT`, `INSERT`, and `UPDATE` of `avg_price_per_kg`, `source`, and `fetched_at` only |
+| `forecasts` | `SELECT`, `INSERT`, and `UPDATE` of `target_month`, `origin_price`, `predicted_log_change`, `predicted_price`, `shap_values`, `is_backfill`, and `generated_at` only |
+
+The role has no access to other tables or views, and cannot alter key columns, create public objects, or delete rows. RLS policies for `pipeline_writer` are limited to select, insert, and update on these three tables so `INSERT ... ON CONFLICT DO UPDATE` works. New tables are not available to the role unless explicitly granted in a later migration.
+
+The migration deliberately contains no password. Set the role password manually in the Supabase SQL Editor and store it only as a GitHub secret in the separate ML repository. The backend API continues to connect as the database owner and never uses `pipeline_writer`.
