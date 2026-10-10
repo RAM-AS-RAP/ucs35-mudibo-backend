@@ -11,6 +11,7 @@ The SQL migrations are the source of truth for the schema. They are applied in t
 7. `20261008000700_views.sql`
 8. `20261008000800_security_rls_and_storage.sql`
 9. `20261008000900_jobs.sql`
+10. `20261010000100_pipeline_writer_role.sql`
 
 `supabase db reset` rebuilds the local database from migrations and then runs configured seed files. `supabase db push` applies pending migrations to the linked remote project. `db push` does not run `seed.sql`.
 

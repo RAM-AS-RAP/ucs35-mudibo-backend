@@ -108,6 +108,53 @@ DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres
 
 The market reference rows are inserted by a migration. `supabase/seed.sql` is intentionally comment-only.
 
+### Pipeline database role
+
+The separate ML repository should connect as the limited `pipeline_writer` role, not as `postgres`. To set it up on the linked hosted project:
+
+1. Apply the additive role migration after reviewing the target project:
+
+	```bash
+	supabase db push
+	```
+
+2. Generate a password locally with Python:
+
+	```bash
+	python -c "import secrets; print(secrets.token_urlsafe(32))"
+	```
+
+	In the Supabase SQL Editor, set the role password, replacing the placeholder with the generated value:
+
+	```sql
+	alter role pipeline_writer with password '<value>';
+	```
+
+	The generated URL-safe value can be embedded in a connection URI. Never commit it or paste it into a file in either repository. Store it only in the ML repository's GitHub secret.
+
+3. Run `supabase/verification/pipeline_role_checks.sql` manually as `postgres` in the Supabase SQL Editor. It verifies allowed upserts and denied access inside a transaction and rolls back its test rows. If the hosted SQL Editor rejects `SET ROLE`, use the manual connection test below instead.
+
+The pipeline role can read `market_locations`, read and insert `market_prices`/`forecasts`, and update only their approved non-key columns. It cannot access users, listings, orders, payments, payment events, or views. The backend API continues using its existing database-owner connection and never uses this role.
+
+For the ML GitHub Actions secret `PIPELINE_DATABASE_URL`, use the transaction-pooler URI shape below. Copy the pooler host and port from the Supabase dashboard's **Connect** panel, and confirm the custom-role username format shown there. The usual custom-role form is:
+
+```text
+postgresql://pipeline_writer.<project-ref>:<password>@<pooler-host>:6543/postgres
+```
+
+You can test the role manually by substituting the dashboard values and generated password in this `psql` command, then running the queries below:
+
+```bash
+psql "postgresql://pipeline_writer.<project-ref>:<password>@<pooler-host>:6543/postgres"
+```
+
+```sql
+select count(*) from market_prices; -- should succeed
+select count(*) from users;         -- should fail with permission denied
+```
+
+To rotate the credential, generate a new value with the Python command above, run `alter role pipeline_writer with password '<new value>';` in the SQL Editor, and update the ML repository's `PIPELINE_DATABASE_URL` secret. Do not place the real URI or password in either repository.
+
 ### Hosted Supabase project
 
 In the Supabase dashboard, open **Settings > Database > Connection string**, select **Transaction pooler**, and copy that project-specific URI into `DATABASE_URL`. Preserve its supplied username, host, port, and database; URI-encode reserved characters in the password. Do not use the local URL above for a hosted project.

@@ -12,8 +12,8 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/auth/me` | Any authenticated user | None | Current account. |
 | GET | `/markets` | Any authenticated user | None | Market directory. |
 | GET | `/prices/current` | Any authenticated user | `crop` query. | Latest price and month per market. |
-| GET | `/prices/trends` | Any authenticated user | `market`, `crop`, optional `months` (1-60). | Ordered historical prices. |
-| GET | `/forecasts` | Farmer | `market`, `crop`, `horizon` queries. | Latest forecast and unchanged SHAP values; 404 if unavailable. |
+| GET | `/prices/trends` | Any authenticated user | `market` (Nairobi, Nakuru, Mombasa, or Kisumu), `crop` (maize or beans), optional `months` (1-12, default 12); market and crop are case-insensitive. | Ordered historical prices. |
+| GET | `/forecasts` | Farmer | `market` (Nairobi, Nakuru, Mombasa, or Kisumu), `crop` (maize or beans), `horizon` (`1` or `2`; legacy `one_month`/`two_month` also accepted). Market/crop casing and surrounding whitespace are normalized. | Latest forecast and unchanged SHAP values; 404 if unavailable. |
 | POST | `/listings` | Farmer | Multipart crop, market, quantity, unit, price, optional image. | Created listing. |
 | GET | `/listings` | Any authenticated user | Optional crop/market, limit, offset. | Active listings with stock. |
 | GET | `/listings/{id}` | Any authenticated user | Listing UUID. | Listing details. |
