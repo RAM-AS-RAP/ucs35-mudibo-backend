@@ -4,8 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
+from app.schemas.common import DecimalOutput
 from app.schemas.payment import PaymentRead
 
 
@@ -14,16 +15,14 @@ class OrderCreate(BaseModel):
     quantity: Decimal = Field(gt=0)
 
 
-class OrderRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
+class OrderRead(DecimalOutput):
     id: UUID
     reference: str
     listing_id: UUID
     buyer_id: UUID
     quantity: Decimal
     unit_price: Decimal
-    total_amount: int
+    total_amount: Decimal
     status: str
     expires_at: datetime
 
