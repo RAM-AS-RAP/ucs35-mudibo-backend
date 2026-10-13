@@ -1,97 +1,98 @@
-"""Marketplace listing routes."""
+"""Farmer-owned listing APIs."""
 
-from decimal import Decimal
-from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, require_role
+from app.core.dependencies import require_role
 from app.db import get_db
-from app.models.enums import UserRole
+from app.models.enums import ListingStatus, OrderStatus, UserRole
 from app.models.user import User
-from app.services import listing_service
+from app.routers.auth import limiter
+from app.schemas.common import Pagination, pagination_params
+from app.schemas.listing import (
+    FarmerOrdersPage,
+    ListingOut,
+    ListingPage,
+    validate_listing_create_form,
+    validate_listing_edit_form,
+)
+from app.services import listing_service, order_service
 
-router = APIRouter(prefix="/listings", tags=["listings"], dependencies=[Depends(get_current_user)])
+router = APIRouter(
+    prefix="/listings",
+    tags=["listings"],
+    dependencies=[Depends(require_role(UserRole.FARMER))],
+)
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=ListingOut)
+@limiter.limit("30/hour")
 async def create_listing(
+    request: Request,
     crop: str = Form(),
     market: str = Form(),
     quantity_available: str = Form(),
     unit: str = Form(default="kg"),
     price_per_unit: str = Form(),
     image: UploadFile | None = File(default=None),
+    _: None = Depends(validate_listing_create_form),
     farmer: User = Depends(require_role(UserRole.FARMER)),
     session: AsyncSession = Depends(get_db),
-) -> Any:
-    return await listing_service.create_listing(
-        session,
-        farmer,
-        {
-            "crop": crop,
-            "market": market,
-            "quantity_available": quantity_available,
-            "unit": unit,
-            "price_per_unit": price_per_unit,
-        },
-        image,
-    )
+) -> ListingOut:
+    del request
+    values = {
+        "crop": crop,
+        "market": market,
+        "quantity_available": quantity_available,
+        "unit": unit,
+        "price_per_unit": price_per_unit,
+    }
+    return await listing_service.create_listing(session, farmer, values, image)
 
 
-@router.get("")
-async def list_listings(
-    crop: str | None = None,
-    market: str | None = None,
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> Any:
-    del user
-    return await listing_service.list_listings(session, crop=crop, market=market, limit=limit, offset=offset)
-
-
-@router.get("/mine")
+@router.get("/mine", response_model=ListingPage)
 async def my_listings(
-    farmer: User = Depends(require_role(UserRole.FARMER)), session: AsyncSession = Depends(get_db)
-) -> Any:
-    return await listing_service.my_listings(session, farmer)
-
-
-@router.get("/mine/orders")
-async def farmer_orders(
-    farmer: User = Depends(require_role(UserRole.FARMER)), session: AsyncSession = Depends(get_db)
-) -> Any:
-    return await listing_service.farmer_orders(session, farmer)
-
-
-@router.get("/{listing_id}")
-async def get_listing(
-    listing_id: UUID, session: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)
-) -> Any:
-    del user
-    return await listing_service.get_listing(session, listing_id)
-
-
-@router.patch("/{listing_id}")
-async def update_listing(
-    listing_id: UUID,
-    quantity_available: Decimal | None = Form(default=None),
-    price_per_unit: Decimal | None = Form(default=None),
-    unit: str | None = Form(default=None),
-    image: UploadFile | None = File(default=None),
+    status_filter: ListingStatus | None = Query(default=None, alias="status"),
+    pagination: Pagination = Depends(pagination_params),
     farmer: User = Depends(require_role(UserRole.FARMER)),
     session: AsyncSession = Depends(get_db),
-) -> Any:
+) -> ListingPage:
+    return await listing_service.my_listings(session, farmer, pagination, status_filter)
+
+
+@router.get("/mine/orders", response_model=FarmerOrdersPage)
+async def farmer_orders(
+    status_filter: OrderStatus | None = Query(default=None, alias="status"),
+    listing_id: UUID | None = None,
+    pagination: Pagination = Depends(pagination_params),
+    farmer: User = Depends(require_role(UserRole.FARMER)),
+    session: AsyncSession = Depends(get_db),
+) -> FarmerOrdersPage:
+    return await order_service.list_orders_for_farmer(session, farmer, pagination, status_filter, listing_id)
+
+
+@router.patch("/{listing_id}", response_model=ListingOut)
+@limiter.limit("30/hour")
+async def update_listing(
+    request: Request,
+    listing_id: UUID,
+    quantity_available: str | None = Form(default=None),
+    price_per_unit: str | None = Form(default=None),
+    image: UploadFile | None = File(default=None),
+    remove_image: bool = Form(default=False),
+    _: None = Depends(validate_listing_edit_form),
+    farmer: User = Depends(require_role(UserRole.FARMER)),
+    session: AsyncSession = Depends(get_db),
+) -> ListingOut:
+    del request
     values = {
         key: value
         for key, value in {
             "quantity_available": quantity_available,
             "price_per_unit": price_per_unit,
-            "unit": unit,
+            "remove_image": remove_image,
         }.items()
         if value is not None
     }
@@ -100,6 +101,8 @@ async def update_listing(
 
 @router.delete("/{listing_id}", status_code=204)
 async def delete_listing(
-    listing_id: UUID, farmer: User = Depends(require_role(UserRole.FARMER)), session: AsyncSession = Depends(get_db)
+    listing_id: UUID,
+    farmer: User = Depends(require_role(UserRole.FARMER)),
+    session: AsyncSession = Depends(get_db),
 ) -> None:
     await listing_service.remove_listing(session, farmer, listing_id)
