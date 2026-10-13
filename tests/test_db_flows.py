@@ -7,7 +7,7 @@ Requests go through the real authentication dependency; only ``get_db`` is redir
 
 import secrets
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -16,14 +16,18 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError
 from app.core.security import create_access_token
 from app.db import get_db, get_engine
-from app.models.enums import CropType, ListingStatus, OrderStatus, PaymentStatus, UserRole
+from app.models.enums import CropType, ForecastHorizon, ListingStatus, OrderStatus, PaymentStatus, PriceSource, UserRole
+from app.models.forecast import Forecast
 from app.models.listing import ProduceListing
+from app.models.market import MarketPrice
 from app.models.order import Order
 from app.models.payment import Payment
 from app.models.user import User
-from app.services import payment_service
+from app.schemas.common import Pagination
+from app.services import forecast_service, listing_service, market_service, order_service, payment_service
 
 pytestmark = pytest.mark.db
 
@@ -218,3 +222,108 @@ async def test_known_crop_and_horizon_still_reach_the_database(
     assert prices.status_code == 200
     assert trends.status_code == 200
     assert forecast.status_code in {200, 404}
+
+
+async def test_get_available_markets_uses_observed_price_rows(db_session: AsyncSession) -> None:
+    with pytest.raises(AppError) as missing_market:
+        await market_service.require_available_market(db_session, "Mombasa")
+    assert missing_market.value.code == "market_not_available"
+
+    db_session.add(
+        MarketPrice(
+            market="Nairobi",
+            crop=CropType.MAIZE,
+            month=date(2099, 1, 1),
+            avg_price_per_kg=Decimal("123.45"),
+            source=PriceSource.FEWS,
+        )
+    )
+    await db_session.commit()
+
+    markets = await market_service.get_available_markets(db_session)
+
+    assert "Nairobi" in markets
+    assert "Mombasa" not in markets
+    assert markets == sorted(set(markets))
+    with pytest.raises(AppError) as exc_info:
+        await market_service.require_available_market(db_session, "Mombasa")
+    assert getattr(exc_info.value, "code", None) == "market_not_available"
+
+
+async def test_latest_forecast_reads_the_latest_forecasts_view(db_session: AsyncSession) -> None:
+    from app.services.market_service import current_month_nairobi
+
+    origin_month = current_month_nairobi()
+    target_month = date(
+        origin_month.year + (origin_month.month == 12),
+        origin_month.month % 12 + 1,
+        1,
+    )
+    await db_session.merge(
+        MarketPrice(
+            market="Nairobi",
+            crop=CropType.BEANS,
+            month=origin_month,
+            avg_price_per_kg=Decimal("99.00"),
+            source=PriceSource.FEWS,
+        )
+    )
+    await db_session.merge(
+        Forecast(
+            market="Nairobi",
+            crop=CropType.BEANS,
+            horizon=ForecastHorizon.ONE_MONTH,
+            origin_month=origin_month,
+            target_month=target_month,
+            origin_price=Decimal("99.00"),
+            predicted_log_change=Decimal("0.01"),
+            predicted_price=Decimal("99.99"),
+            shap_values={"test_feature": 0.1},
+        )
+    )
+    await db_session.commit()
+
+    result = await forecast_service.latest_forecast(db_session, "Nairobi", CropType.BEANS, ForecastHorizon.ONE_MONTH)
+
+    assert result.origin_month == origin_month
+    assert result.target_month == target_month
+    assert result.shap_values == {"test_feature": 0.1}
+
+
+async def test_listing_edit_uses_locked_update_flow(db_session: AsyncSession) -> None:
+    listing = await make_listing(db_session, quantity="4.00")
+    farmer = await db_session.get(User, listing.farmer_id)
+    assert farmer is not None
+
+    result = await listing_service.update_listing(db_session, farmer, listing.id, {"quantity_available": "0"})
+
+    assert result.quantity_available == Decimal("0.00")
+    assert result.status == ListingStatus.SOLD_OUT
+    await db_session.refresh(listing)
+    assert listing.quantity_available == Decimal("0.00")
+
+
+async def test_farmer_orders_join_only_returns_own_listing_orders(db_session: AsyncSession) -> None:
+    farmer_listing = await make_listing(db_session)
+    farmer = await db_session.get(User, farmer_listing.farmer_id)
+    buyer = await make_user(db_session, UserRole.BUYER)
+    assert farmer is not None
+    order = Order(
+        reference=uuid4().hex[:8].upper(),
+        listing_id=farmer_listing.id,
+        buyer_id=buyer.id,
+        buyer_role=UserRole.BUYER,
+        quantity=Decimal("1.00"),
+        unit_price=Decimal("45.50"),
+        total_amount=46,
+        status=OrderStatus.PENDING_PAYMENT,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    page = await order_service.list_orders_for_farmer(db_session, farmer, Pagination(limit=20, offset=0))
+
+    assert page.total == 1
+    assert page.items[0].order_id == order.id
+    assert page.items[0].buyer_name == buyer.name
