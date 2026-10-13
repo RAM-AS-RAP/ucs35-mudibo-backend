@@ -221,7 +221,7 @@ In Windows PowerShell, set the variable first with `$env:RUN_DB_TESTS = "1"`. Ea
 
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, order operations, and payment callback handling have service implementations. Listing and admin service operations remain placeholders; those routes are visible in Swagger but respond with `501 Not Implemented`. Because listings cannot yet be created through the API, the order and payment routes can only be exercised against listing rows inserted directly into the database. Forecast and price data must be populated by the separate ML pipeline or the configured FEWS import before they return useful results.
+Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer order/payment operations, and payment callback handling have service implementations. Admin operations remain placeholders and return `501 Not Implemented`; buyer listing browse/detail routes are out of scope and are not registered. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
 ## Production start
 
@@ -256,6 +256,9 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `ORDER_EXPIRY_MINUTES` | Pending order lifetime. |
 | `RECONCILE_AFTER_SECONDS` | Age after which order reads query Daraja. |
 | `MAX_IMAGE_BYTES` | Maximum listing image upload size. |
+| `MAX_ACTIVE_LISTINGS_PER_FARMER` | Maximum active listings per farmer (default 50). |
+| `IMAGE_MAX_DIMENSION` | Maximum longest side of stored listing images (default 1600 pixels). |
+| `IMAGE_JPEG_QUALITY` | JPEG output quality (default 85). |
 | `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, `SEED_ADMIN_EMAIL` | Initial super-admin profile. |
 | `SEED_ADMIN_PASSWORD` | Optional initial password, at least 12 characters; remove after seeding. |
 

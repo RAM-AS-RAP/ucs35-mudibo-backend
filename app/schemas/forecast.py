@@ -1,12 +1,13 @@
 """Forecast and forecast-accuracy response schemas."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator
 
 from app.models.enums import ForecastHorizon
+from app.schemas.common import DecimalOutput
 
 
 def normalize_horizon(value: object) -> object:
@@ -28,7 +29,7 @@ def normalize_horizon(value: object) -> object:
 HorizonQuery = Annotated[ForecastHorizon, BeforeValidator(normalize_horizon)]
 
 
-class ForecastRead(BaseModel):
+class ForecastRead(DecimalOutput):
     market: str
     crop: str
     horizon: str
@@ -37,7 +38,11 @@ class ForecastRead(BaseModel):
     origin_price: Decimal
     predicted_price: Decimal
     predicted_log_change: Decimal
+    expected_change_pct: Decimal
     shap_values: Any
+    generated_at: datetime
+    based_on: date
+    for_month: date
 
 
 class ForecastAccuracyRead(BaseModel):

@@ -35,3 +35,10 @@ def test_login_throttle_settings_are_available(valid_settings) -> None:
     settings = Settings(**valid_settings)
     assert settings.login_max_failures == 5
     assert settings.login_failure_window_minutes == 15
+
+
+def test_farmer_listing_and_image_settings_have_documented_defaults(valid_settings) -> None:
+    settings = Settings(**valid_settings)
+    assert settings.max_active_listings_per_farmer == 50
+    assert settings.image_max_dimension == 1600
+    assert settings.image_jpeg_quality == 85

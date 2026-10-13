@@ -17,7 +17,7 @@ async def fake_db():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("role", "path"),
-    [(UserRole.FARMER, "/api/v1/listings"), (UserRole.ADMIN, "/api/v1/admin/stats")],
+    [(UserRole.ADMIN, "/api/v1/admin/stats")],
 )
 async def test_placeholder_service_returns_501(api_client, application, role, path) -> None:
     user = SimpleNamespace(id=uuid4(), role=role, is_super_admin=False, is_disabled=False, must_change_password=False)
