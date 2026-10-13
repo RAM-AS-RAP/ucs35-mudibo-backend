@@ -39,6 +39,22 @@ class TooManyAttempts(ServiceError):
     message = "Too many login attempts; try again later"
 
 
+class AppError(ServiceError):
+    """An expected API error with a stable status/code and optional safe reason."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.reason = reason
+
+
 def error_body(code: str, message: str) -> dict[str, dict[str, str]]:
     """Build the public error response envelope."""
     return {"error": {"code": code, "message": message}}
@@ -65,7 +81,11 @@ def install_error_handlers(app: FastAPI) -> None:
         details: list[dict[str, str]] = []
         for error in exc.errors():
             field = (
-                ".".join(str(part) for part in error.get("loc", ()) if part not in {"body", "query", "path", "header"})
+                ".".join(
+                    str(part)
+                    for part in error.get("loc", ())
+                    if part not in {"body", "query", "path", "header", "form"}
+                )
                 or "request"
             )
             fields.add(field)
@@ -85,7 +105,11 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
         del request
-        return JSONResponse(status_code=exc.status_code, content=error_body(exc.code, exc.message))
+        body = error_body(exc.code, exc.message)
+        reason = getattr(exc, "reason", None)
+        if reason is not None:
+            body["error"]["reason"] = reason
+        return JSONResponse(status_code=exc.status_code, content=body)
 
     @app.exception_handler(NotImplementedError)
     async def not_implemented_handler(request: Request, exc: NotImplementedError) -> JSONResponse:

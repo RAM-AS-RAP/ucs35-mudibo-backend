@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     order_expiry_minutes: int = 5
     reconcile_after_seconds: int = 90
     max_image_bytes: int = 5_242_880
+    max_active_listings_per_farmer: int = 50
+    image_max_dimension: int = 1600
+    image_jpeg_quality: int = 85
     seed_admin_name: str = ""
     seed_admin_phone: str = ""
     seed_admin_email: str = ""
@@ -60,6 +63,20 @@ class Settings(BaseSettings):
     def validate_positive_login_limit(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Login throttle settings must be positive")
+        return value
+
+    @field_validator("max_active_listings_per_farmer", "image_max_dimension")
+    @classmethod
+    def validate_positive_farmer_image_limits(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Farmer listing and image dimensions must be positive")
+        return value
+
+    @field_validator("image_jpeg_quality")
+    @classmethod
+    def validate_image_jpeg_quality(cls, value: int) -> int:
+        if not 1 <= value <= 95:
+            raise ValueError("IMAGE_JPEG_QUALITY must be between 1 and 95")
         return value
 
     @field_validator("mpesa_env")
