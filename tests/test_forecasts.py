@@ -60,6 +60,7 @@ async def test_forecast_normalizes_supported_query_values(
         {"market": "Eldoret", "crop": "maize", "horizon": "1"},
         {"market": "Nairobi", "crop": "sorghum", "horizon": "1"},
         {"market": "Nairobi", "crop": "maize", "horizon": "3"},
+        {"market": "Nairobi", "crop": "maize", "horizon": "1_month"},
     ],
 )
 async def test_forecast_rejects_unsupported_values_before_service_call(api_client, application, monkeypatch, params):

@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_current_user, require_role
+from app.core.dependencies import require_role
 from app.db import get_db
 from app.models.enums import UserRole
 from app.schemas.forecast import HorizonQuery
@@ -15,7 +15,7 @@ from app.services import forecast_service
 router = APIRouter(
     prefix="/forecasts",
     tags=["forecasts"],
-    dependencies=[Depends(get_current_user), Depends(require_role(UserRole.FARMER))],
+    dependencies=[Depends(require_role(UserRole.FARMER, UserRole.ADMIN))],
 )
 
 
