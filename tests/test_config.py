@@ -8,7 +8,10 @@ from app.core.config import Settings
 
 @pytest.fixture
 def valid_settings() -> dict[str, object]:
+    # `_env_file: None` keeps the developer's real .env out of these tests: its values must not
+    # change the defaults under test, and must never appear in a failing assertion's output.
     return {
+        "_env_file": None,
         "jwt_secret": "test-only-jwt-secret-at-least-thirty-two-characters",
         "mpesa_env": "sandbox",
         "mpesa_base_url": "https://sandbox.safaricom.co.ke",
@@ -70,7 +73,7 @@ def test_order_settings_are_validated_at_startup(valid_settings, field, value) -
 
 
 def test_payment_settings_have_documented_defaults(valid_settings) -> None:
-    settings = Settings(_env_file=None, **valid_settings)
+    settings = Settings(**valid_settings)
     assert settings.mpesa_max_attempts_per_order == 3
     assert settings.mpesa_min_seconds_before_expiry == 90
     assert settings.mpesa_stale_initiating_seconds == 60
@@ -83,7 +86,6 @@ def test_payment_settings_have_documented_defaults(valid_settings) -> None:
 
 def test_empty_payment_settings_do_not_fail_startup(valid_settings) -> None:
     settings = Settings(
-        _env_file=None,
         **valid_settings,
         mpesa_consumer_key="",
         mpesa_consumer_secret="",
@@ -110,7 +112,7 @@ def test_empty_payment_settings_do_not_fail_startup(valid_settings) -> None:
 )
 def test_payment_settings_are_validated(valid_settings, field, value) -> None:
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, **{**valid_settings, field: value})
+        Settings(**{**valid_settings, field: value})
 
 
 def test_payments_require_an_https_callback_base_url(valid_settings) -> None:
@@ -121,5 +123,5 @@ def test_payments_require_an_https_callback_base_url(valid_settings) -> None:
         "mpesa_passkey": "passkey",
         "mpesa_callback_token": "a" * 24,
     }
-    assert Settings(_env_file=None, **configured, mpesa_callback_base_url="https://x.example").payments_configured
-    assert not Settings(_env_file=None, **configured, mpesa_callback_base_url="http://x.example").payments_configured
+    assert Settings(**configured, mpesa_callback_base_url="https://x.example").payments_configured
+    assert not Settings(**configured, mpesa_callback_base_url="http://x.example").payments_configured
