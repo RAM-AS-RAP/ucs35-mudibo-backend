@@ -43,7 +43,7 @@ from app.schemas.order import (
     OrderPage,
     OrderPaymentSummary,
 )
-from app.services import payment_service
+from app.services import listing_service, payment_service
 from app.utils.phone import mask_phone
 
 REFERENCE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -78,7 +78,12 @@ async def create_order(session: AsyncSession, buyer: User, listing_id: UUID, qua
     # so session.begin() would raise. Everything below runs in that transaction and becomes durable
     # in the single commit at the end; any error before it rolls all of it back.
     # Lock order: checkout locks only this listing row, then inserts a new order (see module docstring).
-    listing = await session.scalar(select(ProduceListing).where(ProduceListing.id == listing_id).with_for_update())
+    # A disabled farmer's listings are unavailable: the same 404 as an unknown listing.
+    listing = await session.scalar(
+        select(ProduceListing)
+        .where(ProduceListing.id == listing_id, listing_service.farmer_not_disabled())
+        .with_for_update(of=ProduceListing)
+    )
     if listing is None or listing.status == ListingStatus.REMOVED:
         raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
     if listing.status != ListingStatus.ACTIVE:
