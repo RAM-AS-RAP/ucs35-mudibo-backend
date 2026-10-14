@@ -72,7 +72,9 @@ class FakeResult:
 
     def mappings(self):
         return SimpleNamespace(
-            first=lambda: self.mapping_rows[0] if self.mapping_rows else None, all=lambda: self.mapping_rows
+            first=lambda: self.mapping_rows[0] if self.mapping_rows else None,
+            all=lambda: self.mapping_rows,
+            one=lambda: self.mapping_rows[0],
         )
 
 
@@ -101,6 +103,7 @@ class FakeDB:
         self.commit_errors = list(commit_errors)
         self.statements: list[str] = []
         self.added: list[object] = []
+        self.added_by: list[tuple[FakeSession, object]] = []
         self.sessions: list[FakeSession] = []
         self.commits = 0
         self.rollbacks = 0
@@ -155,7 +158,8 @@ class FakeSession:
         self.db.statements.append(sql)
         return sql
 
-    async def scalar(self, statement):
+    async def scalar(self, statement, params=None):
+        del params
         return self.db.pop(self.db.scalar_queue, self._record(statement))
 
     async def scalars(self, statement):
@@ -168,6 +172,7 @@ class FakeSession:
     def add(self, row):
         self.in_transaction = True
         self.db.added.append(row)
+        self.db.added_by.append((self, row))
 
     async def flush(self):
         return None

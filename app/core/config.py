@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     mpesa_timeout_reconcile_window_minutes: int = 15
     mpesa_transaction_desc: str = "Crop order"
     callback_max_bytes: int = 16384
+    admin_temp_password_bytes: int = 12
+    resolve_note_min_length: int = 10
     order_expiry_minutes: int = 5
     reconcile_after_seconds: int = 90
     max_image_bytes: int = 5_242_880
@@ -174,6 +176,20 @@ class Settings(BaseSettings):
     def validate_positive_payment_limits(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Payment limits must be positive")
+        return value
+
+    @field_validator("admin_temp_password_bytes")
+    @classmethod
+    def validate_admin_temp_password_bytes(cls, value: int) -> int:
+        if not 12 <= value <= 32:
+            raise ValueError("ADMIN_TEMP_PASSWORD_BYTES must be between 12 and 32")
+        return value
+
+    @field_validator("resolve_note_min_length")
+    @classmethod
+    def validate_resolve_note_min_length(cls, value: int) -> int:
+        if not 1 <= value <= 500:
+            raise ValueError("RESOLVE_NOTE_MIN_LENGTH must be between 1 and 500")
         return value
 
     @property

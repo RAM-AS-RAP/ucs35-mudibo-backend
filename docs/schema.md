@@ -15,7 +15,7 @@ The SQL migrations in `supabase/migrations/` own the database schema. The SQLAlc
 - `produce_listings`: farmer-owned inventory with composite farmer-role foreign key, quantity/status invariants, and soft-removal fields.
 - `orders`: buyer orders with fixed listing, buyer, quantity, price, total, and reference snapshots.
 - `payments`: idempotent Daraja attempts with amount/order validation, one-open-attempt-per-order, and guarded status transitions.
-- `payment_events`: JSONB event log that rejects deletion and mutation except linking an orphan callback to its payment.
+- `payment_events`: JSONB event log that rejects deletion and mutation except linking an orphan callback to its payment. `event_type` is one of `stk_request`, `stk_response`, `callback`, `status_query`, `error`, or `admin_action` (check constraint `payment_events_event_type_check`, replaced by migration `20261015000100_admin_resolution_event.sql`). `admin_action` records how an administrator resolved a `needs_reconciliation` order; `error` events whose payload contains `order_status_before` record why an order was flagged for reconciliation. Run `supabase/verification/admin_event_check.sql` in the SQL Editor after applying the migration.
 
 ## Views
 

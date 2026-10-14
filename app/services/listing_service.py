@@ -8,8 +8,9 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -171,6 +172,12 @@ async def _require_market_location(session: AsyncSession, market: str) -> str:
     return str(canonical)
 
 
+def farmer_not_disabled() -> ColumnElement[bool]:
+    """Condition hiding listings whose farmer is disabled; re-enabling the farmer shows them again."""
+    disabled_farmer = aliased(User)
+    return ~exists().where(disabled_farmer.id == ProduceListing.farmer_id, disabled_farmer.is_disabled.is_(True))
+
+
 _BROWSE_ORDER = {
     ListingSort.NEWEST: (ProduceListing.created_at.desc(), ProduceListing.id.asc()),
     ListingSort.PRICE_ASC: (ProduceListing.price_per_unit.asc(), ProduceListing.id.asc()),
@@ -182,7 +189,11 @@ async def browse_listings(
     session: AsyncSession, filters: ListingBrowseFilters, pagination: Pagination
 ) -> PublicListingPage:
     """Return active listings with stock for buyers, using one count query and one joined page query."""
-    conditions = [ProduceListing.status == ListingStatus.ACTIVE, ProduceListing.quantity_available > 0]
+    conditions = [
+        ProduceListing.status == ListingStatus.ACTIVE,
+        ProduceListing.quantity_available > 0,
+        farmer_not_disabled(),
+    ]
     if filters.market is not None:
         conditions.append(ProduceListing.market == await _require_market_location(session, filters.market))
     if filters.crop is not None:
@@ -210,13 +221,14 @@ async def browse_listings(
 
 
 async def get_public_listing(session: AsyncSession, listing_id: UUID) -> PublicListingDetail:
-    """Return an active or sold-out listing for buyers; removed and unknown ids are the same 404."""
+    """Return an active or sold-out listing for buyers; removed, unknown and disabled-farmer ids are the same 404."""
     result = await session.execute(
         select(ProduceListing, User.name)
         .join(User, User.id == ProduceListing.farmer_id)
         .where(
             ProduceListing.id == listing_id,
             ProduceListing.status.in_([ListingStatus.ACTIVE, ListingStatus.SOLD_OUT]),
+            User.is_disabled.is_(False),
         )
     )
     row = result.first()

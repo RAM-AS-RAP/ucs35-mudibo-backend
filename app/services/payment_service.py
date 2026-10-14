@@ -70,6 +70,11 @@ REQUEST_REJECTED = "request_rejected"
 REQUEST_UNCONFIRMED = "request_unconfirmed"
 AMOUNT_MISMATCH = "amount_mismatch"
 
+# Reasons recorded in the error event written when an order becomes needs_reconciliation.
+RECONCILE_LATE_SUCCESS_AFTER_EXPIRY = "late_success_after_expiry"
+RECONCILE_SUCCESS_ON_CLOSED_PAYMENT = "success_on_closed_payment"
+RECONCILE_SUCCESS_ON_CLOSED_ORDER = "success_on_closed_order"
+
 PROMPT_MESSAGE = "Check your phone and enter your M-Pesa PIN."
 PAYMENT_FAILED_MESSAGE = "Could not start the M-Pesa prompt. Please try again."
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
@@ -184,13 +189,43 @@ def _as_decimal(value: object) -> Decimal | None:
     return amount if amount.is_finite() else None
 
 
-def _apply_success_to_order(order: Order) -> None:
+def _flag_for_reconciliation(
+    session: AsyncSession, order: Order, payment: Payment, reason: str, checkout_request_id: str
+) -> None:
+    """Set the order to ``needs_reconciliation`` and record why, in the caller's transaction.
+
+    The ``error`` event is added to the same session, so it commits or rolls back together with the
+    status change. Its ``order_status_before`` is the context the admin resolve endpoint reads.
+    """
+    order_status_before = str(order.status)
+    order.status = OrderStatus.NEEDS_RECONCILIATION
+    session.add(
+        PaymentEvent(
+            id=uuid4(),
+            payment_id=payment.id,
+            checkout_request_id=checkout_request_id,
+            event_type="error",
+            payload={
+                "reason": reason,
+                "order_status_before": order_status_before,
+                "checkout_request_id": checkout_request_id,
+            },
+        )
+    )
+
+
+def _apply_success_to_order(session: AsyncSession, order: Order, payment: Payment, checkout_request_id: str) -> None:
     """A confirmed payment marks a pending order paid; a closed order needs an administrator."""
     if order.status == OrderStatus.PENDING_PAYMENT:
         order.status = OrderStatus.PAID
     elif order.status in CLOSED_ORDER_STATUSES:
         # The stock of an expired or cancelled order was already restored, so it cannot simply be paid.
-        order.status = OrderStatus.NEEDS_RECONCILIATION
+        reason = (
+            RECONCILE_LATE_SUCCESS_AFTER_EXPIRY
+            if order.status == OrderStatus.EXPIRED
+            else RECONCILE_SUCCESS_ON_CLOSED_ORDER
+        )
+        _flag_for_reconciliation(session, order, payment, reason, checkout_request_id)
 
 
 async def _lock_order_then_payment(
@@ -243,10 +278,11 @@ async def apply_payment_result(
             if (
                 outcome == OUTCOME_SUCCESS
                 and payment.status in (PaymentStatus.FAILED, PaymentStatus.CANCELLED)
-                and order.status != OrderStatus.PAID
+                and order.status not in (OrderStatus.PAID, OrderStatus.NEEDS_RECONCILIATION)
             ):
-                order.status = OrderStatus.NEEDS_RECONCILIATION
-                error = {"reason": "late_success_on_closed_payment", "payment_status": payment.status.value}
+                _flag_for_reconciliation(
+                    session, order, payment, RECONCILE_SUCCESS_ON_CLOSED_PAYMENT, checkout_request_id
+                )
         elif payment.status in (PaymentStatus.INITIATED, PaymentStatus.TIMEOUT) and outcome == OUTCOME_SUCCESS:
             if amount is not None and _as_decimal(amount) != Decimal(payment.amount):
                 # Never mark anything paid when the confirmed amount differs from what was requested.
@@ -255,9 +291,10 @@ async def apply_payment_result(
                     payment.result_code = result_code
                     payment.result_desc = AMOUNT_MISMATCH
                     changed = True
-                if order.status != OrderStatus.PAID:
-                    order.status = OrderStatus.NEEDS_RECONCILIATION
-                error = {"reason": AMOUNT_MISMATCH, "expected": payment.amount, "received": str(amount)}
+                if order.status not in (OrderStatus.PAID, OrderStatus.NEEDS_RECONCILIATION):
+                    _flag_for_reconciliation(session, order, payment, AMOUNT_MISMATCH, checkout_request_id)
+                else:
+                    error = {"reason": AMOUNT_MISMATCH, "expected": payment.amount, "received": str(amount)}
                 result = MISMATCH
             else:
                 payment.status = PaymentStatus.COMPLETED
@@ -265,7 +302,7 @@ async def apply_payment_result(
                 payment.result_desc = result_desc
                 payment.mpesa_receipt_number = receipt
                 payment.completed_at = func.now()
-                _apply_success_to_order(order)
+                _apply_success_to_order(session, order, payment, checkout_request_id)
                 changed = True
                 result = APPLIED
         elif payment.status == PaymentStatus.INITIATED and outcome in _OUTCOME_STATUS:

@@ -493,7 +493,22 @@ async def test_amount_mismatch_never_pays_the_order(amount):
     assert (payment.status, payment.result_desc) == (PaymentStatus.FAILED, "amount_mismatch")
     assert payment.mpesa_receipt_number is None
     assert order.status == OrderStatus.NEEDS_RECONCILIATION
-    assert [event.payload["reason"] for event in db.events_of("error")] == ["amount_mismatch"]
+    assert_reconciliation_event(db, "amount_mismatch", "pending_payment", payment)
+
+
+def assert_reconciliation_event(db, reason, order_status_before, payment):
+    """Exactly one error event, written in the same session (transaction) that locked the order."""
+    events = db.events_of("error")
+    assert len(events) == 1
+    event = events[0]
+    assert event.payload == {
+        "reason": reason,
+        "order_status_before": order_status_before,
+        "checkout_request_id": CHECKOUT_ID,
+    }
+    assert event.payment_id == payment.id
+    adding_session = next(session for session, row in db.added_by if row is event)
+    assert adding_session is db.sessions[0], "the event must be written in the transaction that changed the order"
 
 
 @pytest.mark.parametrize(
@@ -521,9 +536,31 @@ async def test_unknown_checkout_id_is_unmatched():
 async def test_late_success_on_an_expired_order_needs_reconciliation():
     order, payment = pending_pair(status=PaymentStatus.TIMEOUT)
     order.status = OrderStatus.EXPIRED
-    assert await apply(apply_db(order, payment)) == "applied"
+    db = apply_db(order, payment)
+    assert await apply(db) == "applied"
     assert payment.status == PaymentStatus.COMPLETED
     assert order.status == OrderStatus.NEEDS_RECONCILIATION
+    assert_reconciliation_event(db, "late_success_after_expiry", "expired", payment)
+
+
+async def test_success_on_a_cancelled_order_needs_reconciliation():
+    order, payment = pending_pair()
+    order.status = OrderStatus.CANCELLED
+    db = apply_db(order, payment)
+    assert await apply(db) == "applied"
+    assert payment.status == PaymentStatus.COMPLETED
+    assert order.status == OrderStatus.NEEDS_RECONCILIATION
+    assert_reconciliation_event(db, "success_on_closed_order", "cancelled", payment)
+
+
+async def test_mismatch_on_a_paid_order_is_logged_without_flagging_it():
+    order, payment = pending_pair(status=PaymentStatus.TIMEOUT)
+    order.status = OrderStatus.PAID
+    db = apply_db(order, payment)
+    assert await apply(db, amount=1) == "mismatch"
+    assert order.status == OrderStatus.PAID
+    assert [event.payload["reason"] for event in db.events_of("error")] == ["amount_mismatch"]
+    assert "order_status_before" not in db.events_of("error")[0].payload
 
 
 async def test_a_non_success_result_for_a_timed_out_payment_is_a_duplicate():
@@ -539,7 +576,7 @@ async def test_success_after_a_closed_payment_needs_reconciliation(closed):
     assert await apply(db) == "duplicate"
     assert payment.status == closed and payment.mpesa_receipt_number is None
     assert order.status == OrderStatus.NEEDS_RECONCILIATION
-    assert [event.payload["reason"] for event in db.events_of("error")] == ["late_success_on_closed_payment"]
+    assert_reconciliation_event(db, "success_on_closed_payment", "pending_payment", payment)
 
 
 async def test_success_after_a_closed_payment_never_changes_a_paid_order():
