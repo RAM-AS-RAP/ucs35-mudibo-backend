@@ -67,3 +67,59 @@ def test_order_settings_have_documented_defaults(valid_settings) -> None:
 def test_order_settings_are_validated_at_startup(valid_settings, field, value) -> None:
     with pytest.raises(ValidationError):
         Settings(**{**valid_settings, field: value})
+
+
+def test_payment_settings_have_documented_defaults(valid_settings) -> None:
+    settings = Settings(_env_file=None, **valid_settings)
+    assert settings.mpesa_max_attempts_per_order == 3
+    assert settings.mpesa_min_seconds_before_expiry == 90
+    assert settings.mpesa_stale_initiating_seconds == 60
+    assert settings.mpesa_phone_attempts_per_hour == 5
+    assert settings.mpesa_query_min_interval_seconds == 20
+    assert settings.mpesa_timeout_reconcile_window_minutes == 15
+    assert settings.callback_max_bytes == 16384
+    assert settings.mpesa_transaction_desc == "Crop order"
+
+
+def test_empty_payment_settings_do_not_fail_startup(valid_settings) -> None:
+    settings = Settings(
+        _env_file=None,
+        **valid_settings,
+        mpesa_consumer_key="",
+        mpesa_consumer_secret="",
+        mpesa_passkey="",
+        mpesa_callback_token="",
+        mpesa_callback_base_url="",
+    )
+    assert settings.payments_configured is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mpesa_callback_token", "too-short-token"),
+        ("mpesa_callback_token", "not/url/safe/but/long/enough/token"),
+        ("mpesa_callback_token", "has spaces but is long enough to pass"),
+        ("mpesa_test_msisdn", "0708374149"),
+        ("mpesa_test_msisdn", "254608374149"),
+        ("mpesa_transaction_desc", "A description that is too long"),
+        ("mpesa_transaction_desc", ""),
+        ("mpesa_max_attempts_per_order", 0),
+        ("callback_max_bytes", 0),
+    ],
+)
+def test_payment_settings_are_validated(valid_settings, field, value) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{**valid_settings, field: value})
+
+
+def test_payments_require_an_https_callback_base_url(valid_settings) -> None:
+    configured = {
+        **valid_settings,
+        "mpesa_consumer_key": "key",
+        "mpesa_consumer_secret": "secret",
+        "mpesa_passkey": "passkey",
+        "mpesa_callback_token": "a" * 24,
+    }
+    assert Settings(_env_file=None, **configured, mpesa_callback_base_url="https://x.example").payments_configured
+    assert not Settings(_env_file=None, **configured, mpesa_callback_base_url="http://x.example").payments_configured
