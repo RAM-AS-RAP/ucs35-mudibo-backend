@@ -1,4 +1,8 @@
-"""Farmer-owned listing APIs."""
+"""Farmer-owned listing APIs and buyer listing views.
+
+Roles are enforced per route. Static paths (`/mine`, `/mine/orders`) are declared before the
+dynamic `/{listing_id}` routes, and `listing_id` is typed as UUID, so `mine` is never parsed as an id.
+"""
 
 from uuid import UUID
 
@@ -13,18 +17,18 @@ from app.routers.auth import limiter
 from app.schemas.common import Pagination, pagination_params
 from app.schemas.listing import (
     FarmerOrdersPage,
+    ListingBrowseFilters,
     ListingOut,
     ListingPage,
+    PublicListingDetail,
+    PublicListingPage,
+    listing_browse_filters,
     validate_listing_create_form,
     validate_listing_edit_form,
 )
 from app.services import listing_service, order_service
 
-router = APIRouter(
-    prefix="/listings",
-    tags=["listings"],
-    dependencies=[Depends(require_role(UserRole.FARMER))],
-)
+router = APIRouter(prefix="/listings", tags=["listings"])
 
 
 @router.post("", status_code=201, response_model=ListingOut)
@@ -37,8 +41,8 @@ async def create_listing(
     unit: str = Form(default="kg"),
     price_per_unit: str = Form(),
     image: UploadFile | None = File(default=None),
-    _: None = Depends(validate_listing_create_form),
     farmer: User = Depends(require_role(UserRole.FARMER)),
+    _: None = Depends(validate_listing_create_form),
     session: AsyncSession = Depends(get_db),
 ) -> ListingOut:
     del request
@@ -73,6 +77,25 @@ async def farmer_orders(
     return await order_service.list_orders_for_farmer(session, farmer, pagination, status_filter, listing_id)
 
 
+@router.get("", response_model=PublicListingPage)
+async def browse_listings(
+    filters: ListingBrowseFilters = Depends(listing_browse_filters),
+    pagination: Pagination = Depends(pagination_params),
+    _: User = Depends(require_role(UserRole.BUYER)),
+    session: AsyncSession = Depends(get_db),
+) -> PublicListingPage:
+    return await listing_service.browse_listings(session, filters, pagination)
+
+
+@router.get("/{listing_id}", response_model=PublicListingDetail)
+async def listing_detail(
+    listing_id: UUID,
+    _: User = Depends(require_role(UserRole.BUYER)),
+    session: AsyncSession = Depends(get_db),
+) -> PublicListingDetail:
+    return await listing_service.get_public_listing(session, listing_id)
+
+
 @router.patch("/{listing_id}", response_model=ListingOut)
 @limiter.limit("30/hour")
 async def update_listing(
@@ -82,8 +105,8 @@ async def update_listing(
     price_per_unit: str | None = Form(default=None),
     image: UploadFile | None = File(default=None),
     remove_image: bool = Form(default=False),
-    _: None = Depends(validate_listing_edit_form),
     farmer: User = Depends(require_role(UserRole.FARMER)),
+    _: None = Depends(validate_listing_edit_form),
     session: AsyncSession = Depends(get_db),
 ) -> ListingOut:
     del request

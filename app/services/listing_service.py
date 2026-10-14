@@ -16,12 +16,18 @@ from app.core.errors import AppError
 from app.integrations.storage import delete_image, public_url, upload_image
 from app.models.enums import CropType, ListingStatus, OrderStatus, UserRole
 from app.models.listing import ProduceListing
+from app.models.market import MarketLocation
 from app.models.order import Order
 from app.models.user import User
 from app.schemas.common import Pagination
 from app.schemas.listing import (
+    ListingBrowseFilters,
     ListingOut,
     ListingPage,
+    ListingSort,
+    PublicListingDetail,
+    PublicListingOut,
+    PublicListingPage,
 )
 from app.services.market_service import require_available_market
 
@@ -140,21 +146,85 @@ async def create_listing(
     return _listing_out(listing)
 
 
-async def list_listings(
-    session: AsyncSession,
-    *,
-    crop: str | None = None,
-    market: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
-) -> Any:
-    """Browse listings belongs to Module 4 and is intentionally not implemented here."""
-    raise NotImplementedError
+def _public_listing_values(listing: ProduceListing, seller_name: str) -> dict[str, Any]:
+    return {
+        "id": listing.id,
+        "crop": listing.crop.value,
+        "market": listing.market,
+        "quantity_available": listing.quantity_available,
+        "unit": listing.unit,
+        "price_per_unit": listing.price_per_unit,
+        "image_url": public_url(listing.image_path) if listing.image_path else None,
+        "seller_name": seller_name,
+        "status": listing.status.value,
+        "created_at": listing.created_at,
+    }
 
 
-async def get_listing(session: AsyncSession, listing_id: UUID) -> Any:
-    """Buyer listing details belong to Module 4 and are intentionally not implemented here."""
-    raise NotImplementedError
+async def _require_market_location(session: AsyncSession, market: str) -> str:
+    """Return the canonical market name from market_locations, or reject the filter with 422."""
+    canonical = await session.scalar(
+        select(MarketLocation.market_name).where(func.lower(MarketLocation.market_name) == market.strip().lower())
+    )
+    if canonical is None:
+        raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "validation_error", "Market is not a known market.")
+    return str(canonical)
+
+
+_BROWSE_ORDER = {
+    ListingSort.NEWEST: (ProduceListing.created_at.desc(), ProduceListing.id.asc()),
+    ListingSort.PRICE_ASC: (ProduceListing.price_per_unit.asc(), ProduceListing.id.asc()),
+    ListingSort.PRICE_DESC: (ProduceListing.price_per_unit.desc(), ProduceListing.id.asc()),
+}
+
+
+async def browse_listings(
+    session: AsyncSession, filters: ListingBrowseFilters, pagination: Pagination
+) -> PublicListingPage:
+    """Return active listings with stock for buyers, using one count query and one joined page query."""
+    conditions = [ProduceListing.status == ListingStatus.ACTIVE, ProduceListing.quantity_available > 0]
+    if filters.market is not None:
+        conditions.append(ProduceListing.market == await _require_market_location(session, filters.market))
+    if filters.crop is not None:
+        conditions.append(ProduceListing.crop == filters.crop)
+    if filters.min_price is not None:
+        conditions.append(ProduceListing.price_per_unit >= filters.min_price)
+    if filters.max_price is not None:
+        conditions.append(ProduceListing.price_per_unit <= filters.max_price)
+
+    total = int(await session.scalar(select(func.count()).select_from(ProduceListing).where(*conditions)) or 0)
+    result = await session.execute(
+        select(ProduceListing, User.name)
+        .join(User, User.id == ProduceListing.farmer_id)
+        .where(*conditions)
+        .order_by(*_BROWSE_ORDER[filters.sort])
+        .limit(pagination.limit)
+        .offset(pagination.offset)
+    )
+    return PublicListingPage(
+        items=[PublicListingOut(**_public_listing_values(listing, name)) for listing, name in result.all()],
+        total=total,
+        limit=pagination.limit,
+        offset=pagination.offset,
+    )
+
+
+async def get_public_listing(session: AsyncSession, listing_id: UUID) -> PublicListingDetail:
+    """Return an active or sold-out listing for buyers; removed and unknown ids are the same 404."""
+    result = await session.execute(
+        select(ProduceListing, User.name)
+        .join(User, User.id == ProduceListing.farmer_id)
+        .where(
+            ProduceListing.id == listing_id,
+            ProduceListing.status.in_([ListingStatus.ACTIVE, ListingStatus.SOLD_OUT]),
+        )
+    )
+    row = result.first()
+    if row is None:
+        raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
+    listing, seller_name = row
+    available = listing.status == ListingStatus.ACTIVE and listing.quantity_available > 0
+    return PublicListingDetail(**_public_listing_values(listing, seller_name), available=available)
 
 
 async def my_listings(
