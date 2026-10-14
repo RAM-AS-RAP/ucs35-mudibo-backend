@@ -2,13 +2,18 @@
 
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from uuid import UUID
 
-from fastapi import Request
+from fastapi import Query, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict
 
+from app.models.enums import CropType
 from app.schemas.common import DecimalOutput, Page
+from app.schemas.market import CropQuery
+
+MAX_PRICE_FILTER = Decimal("10000000")
 
 
 class ListingCreateForm(BaseModel):
@@ -101,4 +106,64 @@ class FarmerOrdersPage(Page[FarmerOrderOut]):
 
 
 class ListingPage(Page[ListingOut]):
+    pass
+
+
+class ListingSort(StrEnum):
+    NEWEST = "newest"
+    PRICE_ASC = "price_asc"
+    PRICE_DESC = "price_desc"
+
+
+class ListingBrowseFilters(BaseModel):
+    """Validated buyer browse filters."""
+
+    crop: CropType | None = None
+    market: str | None = None
+    min_price: Decimal | None = None
+    max_price: Decimal | None = None
+    sort: ListingSort = ListingSort.NEWEST
+
+
+def listing_browse_filters(
+    crop: CropQuery | None = None,
+    market: str | None = Query(default=None, min_length=1, max_length=100),
+    min_price: Decimal | None = Query(default=None, ge=0, le=MAX_PRICE_FILTER),
+    max_price: Decimal | None = Query(default=None, ge=0, le=MAX_PRICE_FILTER),
+    sort: ListingSort = ListingSort.NEWEST,
+) -> ListingBrowseFilters:
+    """FastAPI dependency that validates browse query parameters, including the price range."""
+    if min_price is not None and max_price is not None and min_price > max_price:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("query", "min_price"),
+                    "msg": "min_price must be less than or equal to max_price",
+                }
+            ]
+        )
+    return ListingBrowseFilters(crop=crop, market=market, min_price=min_price, max_price=max_price, sort=sort)
+
+
+class PublicListingOut(DecimalOutput):
+    """Buyer-facing listing; never includes the farmer's id or contact details."""
+
+    id: UUID
+    crop: str
+    market: str
+    quantity_available: Decimal
+    unit: str
+    price_per_unit: Decimal
+    image_url: str | None
+    seller_name: str
+    status: str
+    created_at: datetime
+
+
+class PublicListingDetail(PublicListingOut):
+    available: bool
+
+
+class PublicListingPage(Page[PublicListingOut]):
     pass

@@ -135,6 +135,17 @@ async def _mark_order_paid(session: AsyncSession, payment: Payment) -> None:
             order.status = OrderStatus.PAID
 
 
+async def maybe_reconcile_payment(session: AsyncSession, order: Order) -> None:
+    """Reconcile a stale open payment of ``order`` before it is shown; currently a deliberate no-op.
+
+    ``GET /orders/{id}`` calls this once per request. Module 5 will implement it here: when the
+    order's latest payment is ``initiated`` and older than ``RECONCILE_AFTER_SECONDS``, query the
+    Daraja STK status and apply the result through callback processing. Until then it reads nothing
+    and writes nothing, so order views never touch a payments row.
+    """
+    del session, order
+
+
 async def reconcile_payment(session: AsyncSession, payment: Payment, client: DarajaClient) -> None:
     """Query a stale STK request and apply its result through callback processing."""
     if not payment.checkout_request_id:

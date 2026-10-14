@@ -9,11 +9,14 @@ import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
@@ -118,9 +121,17 @@ async def test_buyer_creates_order_and_stock_is_reserved(db_client: AsyncClient,
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["buyer_id"] == str(buyer.id)
     assert body["total_amount"] == 114
+    assert body["unit_price"] == 45.5
     assert body["status"] == "pending_payment"
+    assert body["is_expired"] is False
+    assert body["can_pay"] is True
+    assert body["listing"]["id"] == str(listing.id)
+    order = await db_session.get(Order, UUID(body["id"]))
+    assert order is not None
+    assert order.buyer_id == buyer.id
+    assert order.unit_price == Decimal("45.50")
+    assert order.total_amount == 114
     await db_session.refresh(listing)
     assert listing.quantity_available == Decimal("7.50")
     assert listing.status == ListingStatus.ACTIVE
@@ -151,9 +162,82 @@ async def test_order_above_stock_is_rejected_and_stock_unchanged(
     )
 
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "stock_unavailable"
+    assert response.json()["error"]["code"] == "insufficient_stock"
     await db_session.refresh(listing)
     assert listing.quantity_available == Decimal("1.00")
+
+
+async def test_second_order_for_remaining_stock_fails_with_insufficient_stock(db_session: AsyncSession) -> None:
+    listing = await make_listing(db_session, quantity="4.00")
+    first_buyer = await make_user(db_session, UserRole.BUYER)
+    second_buyer = await make_user(db_session, UserRole.BUYER)
+
+    await order_service.create_order(db_session, first_buyer, listing.id, Decimal("3"))
+    with pytest.raises(AppError) as exc_info:
+        await order_service.create_order(db_session, second_buyer, listing.id, Decimal("2"))
+
+    assert exc_info.value.code == "insufficient_stock"
+    await db_session.refresh(listing)
+    assert listing.quantity_available == Decimal("1.00")
+
+
+async def test_cancel_restores_stock_and_reactivates_sold_out_listing(db_session: AsyncSession) -> None:
+    listing = await make_listing(db_session, quantity="2.00")
+    buyer = await make_user(db_session, UserRole.BUYER)
+    created = await order_service.create_order(db_session, buyer, listing.id, Decimal("2"))
+    await db_session.refresh(listing)
+    assert listing.status == ListingStatus.SOLD_OUT
+
+    cancelled = await order_service.cancel_order(db_session, buyer, created.id)
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.can_cancel is False
+    await db_session.refresh(listing)
+    assert listing.quantity_available == Decimal("2.00")
+    assert listing.status == ListingStatus.ACTIVE
+
+
+async def test_expiry_job_expires_order_times_out_payment_and_restores_stock(db_session: AsyncSession) -> None:
+    listing = await make_listing(db_session, quantity="2.00")
+    buyer = await make_user(db_session, UserRole.BUYER)
+    created = await order_service.create_order(db_session, buyer, listing.id, Decimal("2"))
+    payment = Payment(
+        order_id=created.id,
+        idempotency_key=f"key-{uuid4()}",
+        phone_number=buyer.phone_number,
+        stk_phone_number=buyer.phone_number,
+        amount=created.total_amount,
+        status=PaymentStatus.INITIATING,
+    )
+    db_session.add(payment)
+    await db_session.commit()
+
+    await db_session.execute(
+        text("update public.orders set expires_at = now() - interval '1 minute' where id = :id"), {"id": created.id}
+    )
+    await db_session.execute(text("select public.expire_stale_orders()"))
+
+    order = await db_session.get(Order, created.id)
+    assert order is not None
+    await db_session.refresh(order)
+    await db_session.refresh(payment)
+    await db_session.refresh(listing)
+    assert order.status == OrderStatus.EXPIRED
+    assert payment.status == PaymentStatus.TIMEOUT
+    assert listing.quantity_available == Decimal("2.00")
+    assert listing.status == ListingStatus.ACTIVE
+
+
+async def test_database_trigger_rejects_total_amount_update(db_session: AsyncSession) -> None:
+    listing = await make_listing(db_session, quantity="5.00")
+    buyer = await make_user(db_session, UserRole.BUYER)
+    created = await order_service.create_order(db_session, buyer, listing.id, Decimal("1"))
+
+    with pytest.raises(DBAPIError):
+        await db_session.execute(
+            text("update public.orders set total_amount = total_amount + 1 where id = :id"), {"id": created.id}
+        )
+    await db_session.rollback()
 
 
 async def test_order_detail_includes_latest_payment(db_client: AsyncClient, db_session: AsyncSession) -> None:
@@ -164,14 +248,16 @@ async def test_order_detail_includes_latest_payment(db_client: AsyncClient, db_s
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["order"]["id"] == str(order.id)
-    assert body["latest_payment"]["order_id"] == str(order.id)
-    assert body["latest_payment"]["status"] == "initiated"
-    assert body["latest_payment"]["amount"] == 46
+    assert body["id"] == str(order.id)
+    assert body["payment"]["status"] == "initiated"
+    assert body["payment"]["attempts"] == 1
+    assert body["can_pay"] is False
+    assert body["can_cancel"] is False
+    assert "checkout_request_id" not in response.text
 
 
 async def test_second_payment_while_one_is_open_returns_409(
-    db_client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def no_daraja(*args: object, **kwargs: object) -> None:
         raise AssertionError("a rejected payment attempt must not contact Daraja")
@@ -180,12 +266,11 @@ async def test_second_payment_while_one_is_open_returns_409(
     buyer = await make_user(db_session, UserRole.BUYER)
     order = await make_order_with_open_payment(db_session, buyer)
 
-    response = await db_client.post(
-        f"/api/v1/orders/{order.id}/pay", headers={**auth(buyer), "Idempotency-Key": f"key-{uuid4()}"}
-    )
+    with pytest.raises(HTTPException) as exc_info:
+        await payment_service.initiate_payment(db_session, order.id, buyer, f"key-{uuid4()}")
 
-    assert response.status_code == 409, response.text
-    assert response.json()["error"]["code"] == "payment_in_progress"
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "payment_in_progress"
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,7 @@ from app.core.dependencies import get_current_user
 from app.db import get_db
 from app.integrations.storage import StorageError
 from app.models.enums import UserRole
-from app.schemas.listing import ListingOut
+from app.schemas.listing import ListingOut, PublicListingDetail, PublicListingPage
 from app.schemas.market import CurrentPricesResponse, MarketSummary, PriceTrend
 from app.services import forecast_service, listing_service, price_service
 
@@ -251,12 +251,59 @@ async def test_missing_token_is_401_for_farmer_module(api_client, application):
     assert response.headers["www-authenticate"] == "Bearer"
 
 
-def test_module_three_does_not_register_buyer_browse_or_detail_routes(application):
+def test_listing_routes_register_buyer_views_alongside_farmer_routes(application):
     paths = application.openapi()["paths"]
-    assert paths["/api/v1/listings"].keys() == {"post"}
-    assert "/api/v1/listings/{listing_id}" in paths
-    assert "get" not in paths["/api/v1/listings/{listing_id}"]
-    assert paths["/api/v1/listings/{listing_id}"].keys() == {"patch", "delete"}
+    assert paths["/api/v1/listings"].keys() == {"post", "get"}
+    assert paths["/api/v1/listings/{listing_id}"].keys() == {"get", "patch", "delete"}
+    assert paths["/api/v1/listings/mine"].keys() == {"get"}
+
+
+def test_static_listing_paths_are_declared_before_the_dynamic_id_route():
+    from app.routers import listings
+
+    paths = [getattr(route, "path", "") for route in listings.router.routes]
+    first_dynamic = paths.index("/listings/{listing_id}")
+    assert paths.index("/listings/mine") < first_dynamic
+    assert paths.index("/listings/mine/orders") < first_dynamic
+
+
+@pytest.mark.asyncio
+async def test_buyer_gets_200_on_browse_and_detail(api_client, application, monkeypatch):
+    install_user(application, UserRole.BUYER)
+
+    async def browse(session, filters, pagination):
+        return PublicListingPage(items=[], total=0, limit=pagination.limit, offset=pagination.offset)
+
+    async def detail(session, listing_id):
+        return PublicListingDetail(
+            id=listing_id,
+            crop="maize",
+            market="Nairobi",
+            quantity_available="2.00",
+            unit="kg",
+            price_per_unit="10.00",
+            image_url=None,
+            seller_name="Farmer",
+            status="active",
+            created_at=datetime.now(UTC),
+            available=True,
+        )
+
+    monkeypatch.setattr(listing_service, "browse_listings", browse)
+    monkeypatch.setattr(listing_service, "get_public_listing", detail)
+    browse_response = await api_client.get("/api/v1/listings")
+    detail_response = await api_client.get(f"/api/v1/listings/{uuid4()}")
+    assert [browse_response.status_code, detail_response.status_code] == [200, 200]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [UserRole.FARMER, UserRole.ADMIN])
+@pytest.mark.parametrize("path", ["/api/v1/listings", f"/api/v1/listings/{uuid4()}"])
+async def test_farmer_and_admin_are_forbidden_from_buyer_listing_views(api_client, application, role, path):
+    install_user(application, role)
+    response = await api_client.get(path)
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "forbidden"
 
 
 def test_listing_create_openapi_exposes_multipart_fields(application):

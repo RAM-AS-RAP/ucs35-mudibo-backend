@@ -48,11 +48,13 @@ class AppError(ServiceError):
         code: str,
         message: str,
         reason: str | None = None,
+        extra: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.reason = reason
+        self.extra = dict(extra or {})
 
 
 def error_body(code: str, message: str) -> dict[str, dict[str, str]]:
@@ -109,6 +111,8 @@ def install_error_handlers(app: FastAPI) -> None:
         reason = getattr(exc, "reason", None)
         if reason is not None:
             body["error"]["reason"] = reason
+        for key, value in getattr(exc, "extra", {}).items():
+            body["error"].setdefault(key, value)
         return JSONResponse(status_code=exc.status_code, content=body)
 
     @app.exception_handler(NotImplementedError)

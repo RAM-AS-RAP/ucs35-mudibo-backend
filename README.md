@@ -219,9 +219,19 @@ RUN_DB_TESTS=1 python -m pytest -q -m db
 
 In Windows PowerShell, set the variable first with `$env:RUN_DB_TESTS = "1"`. Each database test runs inside a transaction that is rolled back, so no rows are left behind.
 
+### Checkout concurrency check (manual)
+
+`scripts/check_checkout_concurrency.py` proves that concurrent buyers cannot reserve the same stock. It is not part of `pytest` and must be run by hand:
+
+```bash
+ALLOW_CONCURRENCY_CHECK=1 python -m scripts.check_checkout_concurrency
+```
+
+In Windows PowerShell, set `$env:ALLOW_CONCURRENCY_CHECK = "1"` first. **Warning:** the script writes committed rows to the database in `DATABASE_URL`, so use only a local or disposable database. It refuses to run when `APP_ENV=production`. It deletes the orders and listings it creates, but users cannot be deleted, so six disabled `ZZ_TEST_` users remain after each run. It prints PASS or FAIL per scenario and exits non-zero on failure.
+
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer order/payment operations, and payment callback handling have service implementations. Admin operations remain placeholders and return `501 Not Implemented`; buyer listing browse/detail routes are out of scope and are not registered. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
+Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and payment callback handling have service implementations. The order pay endpoint arrives in Module 5. Admin operations remain placeholders and return `501 Not Implemented`. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
 ## Production start
 
@@ -253,12 +263,16 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `MPESA_CALLBACK_BASE_URL` / `MPESA_CALLBACK_TOKEN` | Public callback base URL and secret path token. |
 | `MPESA_STK_TARGET` | `registered` or `test_msisdn` for sandbox prompts. |
 | `MPESA_TEST_MSISDN` | Sandbox test phone used by `test_msisdn` mode. |
-| `ORDER_EXPIRY_MINUTES` | Pending order lifetime. |
+| `ORDER_EXPIRY_MINUTES` | Pending order lifetime and stock reservation, 2 to 30 minutes (default 5). |
 | `RECONCILE_AFTER_SECONDS` | Age after which order reads query Daraja. |
 | `MAX_IMAGE_BYTES` | Maximum listing image upload size. |
 | `MAX_ACTIVE_LISTINGS_PER_FARMER` | Maximum active listings per farmer (default 50). |
 | `IMAGE_MAX_DIMENSION` | Maximum longest side of stored listing images (default 1600 pixels). |
 | `IMAGE_JPEG_QUALITY` | JPEG output quality (default 85). |
+| `MIN_ORDER_QUANTITY` | Smallest order quantity in kg (default 1). |
+| `MIN_ORDER_TOTAL_KES` | Smallest order total in shillings (default 10). |
+| `MAX_PENDING_ORDERS_PER_BUYER` | Unexpired pending orders a buyer may hold (default 3). |
+| `ORDER_REFERENCE_LENGTH` | Order reference length, 6 to 12 characters (default 8). |
 | `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, `SEED_ADMIN_EMAIL` | Initial super-admin profile. |
 | `SEED_ADMIN_PASSWORD` | Optional initial password, at least 12 characters; remove after seeding. |
 

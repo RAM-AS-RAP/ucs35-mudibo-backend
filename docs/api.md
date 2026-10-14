@@ -19,10 +19,12 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | PATCH | `/listings/{id}` | Owning farmer | Multipart optional quantity, price, image replacement, or `remove_image`. | Updated `ListingOut`. Errors: `listing_not_found` (404), `listing_removed` (409), `no_changes` (422). |
 | DELETE | `/listings/{id}` | Owning farmer | Listing UUID. | Soft-remove with 204; repeat delete is idempotent. `listing_has_pending_orders` returns 409. |
 | GET | `/listings/mine/orders` | Farmer | Optional order `status`, `listing_id`, `limit` (1-100, default 20), `offset`. | Paginated own-listing orders with latest payment metadata, buyer name only, and a sandbox/delivery note. |
-| POST | `/orders` | Buyer | Listing UUID and quantity. | Created order with server-calculated total. |
-| GET | `/orders/mine` | Buyer | None | Purchase history, newest first. |
-| GET | `/orders/{id}` | Owning buyer or admin | Order UUID. | Order and latest payment; may reconcile stale payment. |
-| POST | `/orders/{id}/pay` | Owning buyer | `Idempotency-Key` header. | Payment status. |
+| GET | `/listings` | Buyer | Optional `crop`, `market`, `min_price`, `max_price`, `sort`, `limit`, `offset`. | Paginated active listings with stock (`PublicListingOut`). |
+| GET | `/listings/{id}` | Buyer | Listing UUID. | Active or sold-out listing with `available`; removed or unknown is 404. |
+| POST | `/orders` | Buyer | JSON `listing_id` and `quantity`. | Created `OrderOut` (201) with stock reserved and a server-calculated total. |
+| GET | `/orders/mine` | Buyer | Optional `status`, `limit`, `offset`. | Own orders, newest first, with listing and payment summaries. |
+| GET | `/orders/{id}` | Owning buyer, or admin (read only) | Order UUID. | `OrderOut`. |
+| POST | `/orders/{id}/cancel` | Owning buyer | Order UUID. | Cancelled `OrderOut`; stock is returned to the listing. |
 | POST | `/payments/callback/{token}` | Daraja callback | Daraja STK callback JSON. | Always accepts valid-token callbacks with ResultCode 0. |
 | POST | `/admin/admins` | Super admin | Name, phone, email, temporary password. | Created non-super admin. |
 | GET | `/admin/users` | Admin | Optional role, limit, offset. | Paginated users. |
@@ -34,7 +36,7 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/admin/stats` | Admin | None | User, listing, order, and sandbox payment aggregates. |
 | GET | `/admin/forecast-accuracy` | Admin | Optional market, crop, horizon. | Accuracy rows and pooled summary. |
 
-Admin services remain placeholders and return `501 not_implemented`. Buyer listing browse/detail routes are out of scope and are not registered. Buyers cannot access markets, prices, forecasts, or farmer listings; only farmers and admins can read market data.
+Admin services remain placeholders and return `501 not_implemented`. The order pay endpoint (`POST /orders/{id}/pay`) arrives in Module 5. Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
 
 Only markets with published price data are offered (currently Nairobi and Kisumu). Crop values are `maize` or `beans`; forecast horizons are `one_month` or `two_month`. Market/crop values are normalized for case and surrounding whitespace. Unsupported values return 422; no-data markets return 404 `market_not_available`. A forecast is shown only when its origin equals the series' latest price month and that month is no more than two calendar months old in `Africa/Nairobi`; otherwise it returns 404 `forecast_unavailable` with reason `no_forecast` or `stale`. Prices and forecasts are read from stored pipeline output; this API does not invent or compute them.
 
@@ -170,6 +172,112 @@ Listing responses use `ListingOut`: `id`, `farmer_id`, `crop`, `market`, `quanti
 	"note": "A paid status is a simulated sandbox payment confirmation; delivery is arranged outside the platform."
 }
 ```
+
+## Buyer marketplace API
+
+Only buyers use these routes, except that an admin may read a single order. Buyers cannot see prices or forecasts. The client never sends a role, buyer id, price, total, or status; all are derived on the server.
+
+Stock is reserved at checkout: the ordered quantity is removed from the listing immediately and the order stays `pending_payment` for `ORDER_EXPIRY_MINUTES` (default 5), measured by the database clock. A scheduled database job expires unpaid orders and returns their stock. A buyer can hold at most `MAX_PENDING_ORDERS_PER_BUYER` (default 3) unexpired pending orders, and only one per listing. The pay endpoint arrives in Module 5.
+
+| Method and path | Roles | Success | Other status codes and error codes |
+| --- | --- | --- | --- |
+| `GET /listings` | Buyer | 200 | 422 `validation_error` (bad crop, unknown market, negative or reversed price range, bad sort or pagination). |
+| `GET /listings/{id}` | Buyer | 200 | 404 `listing_not_found` (removed or unknown, identical bodies); 422 for a non-UUID id. |
+| `POST /orders` | Buyer | 201 | 404 `listing_not_found`; 409 `listing_unavailable`, `insufficient_stock`, `pending_order_exists` (with `existing_order_id`), `too_many_pending_orders`; 422 `order_too_small` or `validation_error`; 429 `rate_limited` (30 per hour per IP). |
+| `GET /orders/mine` | Buyer | 200 | 422 `validation_error` for an invalid status or pagination. |
+| `GET /orders/{id}` | Owning buyer, admin | 200 | 404 `order_not_found` (another buyer's order and an unknown id give identical bodies). |
+| `POST /orders/{id}/cancel` | Owning buyer | 200 (also for an already cancelled order) | 404 `order_not_found`; 409 `order_not_cancellable` (paid, expired, or any other non-pending status), `payment_in_progress`; 429 `rate_limited` (30 per hour per IP). |
+
+All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
+
+### `GET /listings`
+
+Query parameters: `crop` (`maize` or `beans`), `market` (must exist in `market_locations`, case-insensitive), `min_price` and `max_price` (non-negative decimals, `min_price <= max_price`), `sort` (`newest` default, `price_asc`, `price_desc`; ties are broken by id), `limit` (1-100, default 20), `offset`. Only `active` listings with `quantity_available > 0` are returned.
+
+```json
+{
+	"items": [
+		{
+			"id": "123e4567-e89b-12d3-a456-426614174000",
+			"crop": "maize",
+			"market": "Nairobi",
+			"quantity_available": 10.0,
+			"unit": "kg",
+			"price_per_unit": 40.0,
+			"image_url": null,
+			"seller_name": "Jane Wanjiku",
+			"status": "active",
+			"created_at": "2026-10-13T08:00:00Z"
+		}
+	],
+	"total": 1,
+	"limit": 20,
+	"offset": 0
+}
+```
+
+Listings show the seller's name only, never the farmer's id, phone number, or email.
+
+### `GET /listings/{id}`
+
+Returns the same fields plus `available` (true when the listing is active and has stock). A `sold_out` listing is returned with `available: false`.
+
+### `POST /orders`
+
+Body (unknown fields are rejected with 422):
+
+```json
+{"listing_id": "123e4567-e89b-12d3-a456-426614174000", "quantity": "2.5"}
+```
+
+`quantity` is a string or number: finite, greater than 0, at most two decimal places, at least `MIN_ORDER_QUANTITY` (default 1), at most 100000. `unit_price` is the listing's current price, and `total_amount = ceil(quantity × unit_price)` in whole shillings; a total below `MIN_ORDER_TOTAL_KES` (default 10) returns 422 `order_too_small`. Ordering the remaining stock marks the listing `sold_out`. If the buyer already has a pending order for the listing, the 409 body contains its id so the client can continue with it:
+
+```json
+{"error": {"code": "pending_order_exists", "message": "You already have an order awaiting payment for this listing.", "existing_order_id": "123e4567-e89b-12d3-a456-426614174009"}}
+```
+
+### Order response (`OrderOut`)
+
+```json
+{
+	"id": "123e4567-e89b-12d3-a456-426614174009",
+	"reference": "K7QX2MPA",
+	"status": "pending_payment",
+	"is_expired": false,
+	"quantity": 2.5,
+	"unit_price": 112.56,
+	"total_amount": 282,
+	"expires_at": "2026-10-13T09:05:00Z",
+	"server_time": "2026-10-13T09:00:00Z",
+	"created_at": "2026-10-13T09:00:00Z",
+	"can_pay": true,
+	"can_cancel": true,
+	"listing": {
+		"id": "123e4567-e89b-12d3-a456-426614174000",
+		"crop": "maize",
+		"market": "Nairobi",
+		"unit": "kg",
+		"image_url": null,
+		"seller_name": "Jane Wanjiku",
+		"status": "active"
+	},
+	"payment": null,
+	"note": "Payments run in the Safaricom sandbox. A paid order is a simulated confirmation, no real money moves, and delivery is arranged outside the platform."
+}
+```
+
+- `server_time` is the database time; use it with `expires_at` for a countdown instead of the device clock.
+- `is_expired` is true for a `pending_payment` order whose `expires_at` has passed, even before the expiry job has run.
+- `payment` is null, or the latest payment: `status`, `mpesa_receipt_number`, `result_desc`, `completed_at`, and `attempts` (number of payment rows). Payment identifiers, idempotency keys, phone numbers, and callback data are never returned.
+- `can_pay` is true only for the owning buyer, when the order is `pending_payment`, not expired, and has no open (`initiating` or `initiated`) payment. `can_cancel` is true for the owning buyer when the order is `pending_payment` with no open payment. Both are false for an admin.
+
+### `GET /orders/mine`
+
+Query parameters: optional `status` (an order status), `limit` (1-100, default 20), `offset`. Returns `{items, total, limit, offset}` of `OrderOut`, newest first.
+
+### `POST /orders/{id}/cancel`
+
+Cancels the buyer's own `pending_payment` order and returns its quantity to the listing; a `sold_out` listing becomes `active` again (a removed listing gets its quantity back but stays removed). Cancelling an already cancelled order returns 200 with the current order.
 
 ## Authentication details
 
