@@ -73,10 +73,22 @@ class OrderListingSummary(BaseModel):
     status: str
 
 
+PAYMENT_STATUS_MESSAGES = {
+    "initiating": "Sending the payment request",
+    "initiated": "Waiting for you to confirm on your phone",
+    "completed": "Payment received",
+    "cancelled": "You cancelled the payment request",
+    "timeout": "The request timed out",
+    "failed": "The payment failed",
+}
+
+
 class OrderPaymentSummary(BaseModel):
-    """Latest payment of an order, without identifiers, phone numbers, or callback data."""
+    """Latest payment of an order, without identifiers, full phone numbers, or callback data."""
 
     status: str
+    status_message: str
+    stk_target_masked: str
     mpesa_receipt_number: str | None
     result_desc: str | None
     completed_at: datetime | None
@@ -103,3 +115,10 @@ class OrderOut(DecimalOutput):
 
 class OrderPage(Page[OrderOut]):
     pass
+
+
+class PaymentStartOut(OrderOut):
+    """Response of ``POST /orders/{id}/pay``: the order plus where the STK prompt was sent."""
+
+    message: str
+    prompt: str
