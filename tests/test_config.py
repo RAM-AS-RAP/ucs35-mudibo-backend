@@ -125,3 +125,23 @@ def test_payments_require_an_https_callback_base_url(valid_settings) -> None:
     }
     assert Settings(**configured, mpesa_callback_base_url="https://x.example").payments_configured
     assert not Settings(**configured, mpesa_callback_base_url="http://x.example").payments_configured
+
+
+def test_admin_settings_have_documented_defaults(valid_settings) -> None:
+    settings = Settings(**valid_settings)
+    assert settings.admin_temp_password_bytes == 12
+    assert settings.resolve_note_min_length == 10
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("admin_temp_password_bytes", 11),
+        ("admin_temp_password_bytes", 33),
+        ("resolve_note_min_length", 0),
+        ("resolve_note_min_length", 501),
+    ],
+)
+def test_admin_settings_are_validated(valid_settings, field, value) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{**valid_settings, field: value})
