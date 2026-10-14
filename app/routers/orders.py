@@ -1,21 +1,20 @@
-"""Buyer order routes: checkout, history, detail, and cancel.
-
-The pay endpoint arrives in Module 5.
-"""
+"""Buyer order routes: checkout, history, detail, cancel, and pay."""
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_role
-from app.db import get_db
+from app.core.errors import AppError
+from app.db import get_db, get_session_factory
+from app.integrations.daraja import DarajaClient, get_daraja_client
 from app.models.enums import OrderStatus, UserRole
 from app.models.user import User
 from app.routers.auth import limiter
 from app.schemas.common import Pagination, pagination_params
-from app.schemas.order import OrderCreate, OrderOut, OrderPage
-from app.services import order_service
+from app.schemas.order import OrderCreate, OrderOut, OrderPage, PaymentStartOut
+from app.services import order_service, payment_service
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -47,8 +46,12 @@ async def get_order(
     order_id: UUID,
     user: User = Depends(require_role(UserRole.BUYER, UserRole.ADMIN)),
     session: AsyncSession = Depends(get_db),
+    session_factory: payment_service.SessionFactory = Depends(get_session_factory),
+    daraja_client: DarajaClient | None = Depends(get_daraja_client),
 ) -> OrderOut:
-    return await order_service.get_order(session, order_id, user)
+    return await order_service.get_order(
+        session, order_id, user, session_factory=session_factory, daraja_client=daraja_client
+    )
 
 
 @router.post("/{order_id}/cancel", response_model=OrderOut)
@@ -61,3 +64,25 @@ async def cancel_order(
 ) -> OrderOut:
     del request
     return await order_service.cancel_order(session, buyer, order_id)
+
+
+@router.post("/{order_id}/pay", status_code=status.HTTP_202_ACCEPTED, response_model=PaymentStartOut)
+@limiter.limit("10/minute")
+async def pay_order(
+    request: Request,
+    order_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    buyer: User = Depends(require_role(UserRole.BUYER)),
+    session: AsyncSession = Depends(get_db),
+    session_factory: payment_service.SessionFactory = Depends(get_session_factory),
+    daraja_client: DarajaClient | None = Depends(get_daraja_client),
+) -> PaymentStartOut:
+    """Send an M-Pesa STK prompt for the buyer's order; amount and phone always come from the server."""
+    raw_key = payment_service.validate_idempotency_key(idempotency_key)
+    if (await request.body()).strip():
+        raise AppError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "body_not_allowed", "This endpoint does not accept a request body."
+        )
+    started = await payment_service.initiate_payment(session, session_factory, daraja_client, buyer, order_id, raw_key)
+    order = await order_service.order_view(session, order_id, buyer)
+    return PaymentStartOut(**order.model_dump(), message=started.message, prompt=started.prompt)
