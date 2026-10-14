@@ -1,253 +1,795 @@
-"""Payment initiation and idempotent Daraja callback processing."""
+"""Daraja sandbox payments: starting STK requests, applying results, callbacks, and reconciliation.
 
-from datetime import UTC, datetime
+Lock order, shared with ``public.expire_stale_orders()`` and the order service: orders, then
+payments, then listings. Payment code locks an order and then its payment, and never locks a listing.
+
+No database transaction is held open while an HTTP request to Daraja is in flight. Payment events
+are written by ``log_event`` in their own short transactions, so they survive a rollback of the
+caller's transaction.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import HTTPException
-from sqlalchemy import select, update
+from fastapi import status
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
-from app.integrations.daraja import DarajaClient, DarajaError, redact
+from app.core.config import Settings, get_settings
+from app.core.errors import AppError
+from app.integrations.daraja import (
+    OUTCOME_CANCELLED,
+    OUTCOME_FAILED,
+    OUTCOME_SUCCESS,
+    OUTCOME_TIMEOUT,
+    STATE_PENDING,
+    DarajaClient,
+    DarajaError,
+    DarajaTimeout,
+    StkPushResult,
+    outcome_for_result_code,
+    parse_result_code,
+    redact,
+)
 from app.models.enums import OrderStatus, PaymentStatus, UserRole
 from app.models.order import Order
 from app.models.payment import Payment, PaymentEvent
 from app.models.user import User
+from app.utils.phone import mask_phone
+
+logger = logging.getLogger(__name__)
+
+SessionFactory = Callable[[], AsyncSession]
+
+EVENT_PAYLOAD_MAX_BYTES = 16384
+RAW_BODY_PREVIEW_BYTES = 1024
+OPEN_STATUSES = (PaymentStatus.INITIATING, PaymentStatus.INITIATED)
+TERMINAL_STATUSES = (PaymentStatus.COMPLETED, PaymentStatus.FAILED, PaymentStatus.CANCELLED)
+CLOSED_ORDER_STATUSES = (OrderStatus.EXPIRED, OrderStatus.CANCELLED, OrderStatus.PAYMENT_FAILED)
+
+APPLIED = "applied"
+DUPLICATE = "duplicate"
+MISMATCH = "mismatch"
+UNMATCHED = "unmatched"
+
+SOURCE_CALLBACK = "callback"
+SOURCE_QUERY = "query"
+
+REQUEST_NOT_SENT = "request_not_sent"
+REQUEST_REJECTED = "request_rejected"
+REQUEST_UNCONFIRMED = "request_unconfirmed"
+AMOUNT_MISMATCH = "amount_mismatch"
+
+PROMPT_MESSAGE = "Check your phone and enter your M-Pesa PIN."
+PAYMENT_FAILED_MESSAGE = "Could not start the M-Pesa prompt. Please try again."
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+_OUTCOME_STATUS = {
+    OUTCOME_CANCELLED: PaymentStatus.CANCELLED,
+    OUTCOME_TIMEOUT: PaymentStatus.TIMEOUT,
+    OUTCOME_FAILED: PaymentStatus.FAILED,
+}
+_LONG_DIGITS = re.compile(r"\d{9,}")
 
 
-def callback_fields(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Extract the standard Daraja STK callback and metadata fields, tolerating malformed shapes."""
+# Configuration -------------------------------------------------------------------------------
+
+
+def payments_unavailable() -> AppError:
+    return AppError(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "payments_unavailable", "Payments are temporarily unavailable."
+    )
+
+
+def require_payments_configured(settings: Settings, client: DarajaClient | None) -> None:
+    """Fail with 503 when the payment settings are missing, the callback URL is not HTTPS, or no client exists."""
+    if client is None or not settings.payments_configured:
+        raise payments_unavailable()
+
+
+def callback_url(settings: Settings) -> str:
+    """The URL Daraja calls back. It contains the secret token, so it is never logged or stored."""
+    return f"{settings.mpesa_callback_base_url.rstrip('/')}/api/v1/payments/callback/{settings.mpesa_callback_token}"
+
+
+def stk_target(settings: Settings, buyer: User) -> str:
+    """The phone that receives the prompt: the buyer's number, or the sandbox test number."""
+    return settings.mpesa_test_msisdn if settings.mpesa_stk_target == "test_msisdn" else buyer.phone_number
+
+
+# Event logging -------------------------------------------------------------------------------
+
+
+def _mask_long_digits(text: str) -> str:
+    """Mask any run of 9 or more digits (a possible phone number) in free text."""
+    return _LONG_DIGITS.sub(lambda match: mask_phone(match.group()), text)
+
+
+def _json_safe(payload: Any) -> Any:
+    """Convert Decimals, datetimes and UUIDs to JSON values, never through a binary floating point type."""
+    return json.loads(json.dumps(payload, default=str))
+
+
+def _capped(payload: Any) -> dict[str, Any]:
+    """Redact the payload and cap its JSON size at 16 KB, replacing an oversize body with a truncated preview."""
+    safe = _json_safe(redact(payload))
+    if not isinstance(safe, dict):
+        safe = {"value": safe}
+    text = json.dumps(safe)
+    size = len(text.encode())
+    if size <= EVENT_PAYLOAD_MAX_BYTES:
+        return safe
+    keep = EVENT_PAYLOAD_MAX_BYTES - 256
+    while True:
+        preview = _mask_long_digits(text.encode()[:keep].decode("utf-8", "ignore"))
+        capped = {"truncated": True, "original_bytes": size, "preview": preview}
+        overflow = len(json.dumps(capped).encode()) - EVENT_PAYLOAD_MAX_BYTES
+        if overflow <= 0:
+            return capped
+        # Escaping (quotes, backslashes) makes the stored preview longer than the bytes kept.
+        keep -= overflow
+
+
+async def log_event(
+    session_factory: SessionFactory,
+    event_type: str,
+    payload: Any,
+    payment_id: UUID | None = None,
+    checkout_request_id: str | None = None,
+) -> UUID | None:
+    """Append one payment event in its own short transaction and return its id, or None if it was not saved.
+
+    The payload is redacted (no passwords, tokens or full phone numbers) and capped at 16 KB. Logging never
+    raises: an event that cannot be stored is reported in the application log by exception type only.
+    """
+    event_id = uuid4()
+    try:
+        async with session_factory() as session:
+            session.add(
+                PaymentEvent(
+                    id=event_id,
+                    payment_id=payment_id,
+                    checkout_request_id=checkout_request_id,
+                    event_type=event_type,
+                    payload=_capped(payload),
+                )
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - an event must never break the payment flow
+        logger.warning("Could not store a %s payment event: %s", event_type, type(exc).__name__)
+        return None
+    return event_id
+
+
+# Applying results ----------------------------------------------------------------------------
+
+
+def _as_decimal(value: object) -> Decimal | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        amount = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount.is_finite() else None
+
+
+def _apply_success_to_order(order: Order) -> None:
+    """A confirmed payment marks a pending order paid; a closed order needs an administrator."""
+    if order.status == OrderStatus.PENDING_PAYMENT:
+        order.status = OrderStatus.PAID
+    elif order.status in CLOSED_ORDER_STATUSES:
+        # The stock of an expired or cancelled order was already restored, so it cannot simply be paid.
+        order.status = OrderStatus.NEEDS_RECONCILIATION
+
+
+async def _lock_order_then_payment(
+    session: AsyncSession, order_id: UUID, payment_id: UUID
+) -> tuple[Order | None, Payment | None]:
+    """Lock the order first and the payment second, and re-read both after the locks are held."""
+    order = await session.scalar(
+        select(Order).where(Order.id == order_id).with_for_update().execution_options(populate_existing=True)
+    )
+    payment = await session.scalar(
+        select(Payment).where(Payment.id == payment_id).with_for_update().execution_options(populate_existing=True)
+    )
+    return order, payment
+
+
+async def apply_payment_result(
+    session_factory: SessionFactory,
+    checkout_request_id: str,
+    outcome: str,
+    *,
+    result_code: int | None,
+    result_desc: str | None,
+    receipt: str | None = None,
+    amount: object = None,
+    source: str,
+) -> str:
+    """Apply a Daraja result to a payment and its order once; return applied, duplicate, mismatch or unmatched.
+
+    Safe to call repeatedly and concurrently for the same checkout id: the order and payment rows are
+    locked (order first) and the payment state is re-read under the lock before anything changes.
+    """
+    error: dict[str, Any] | None = None
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(Payment.id, Payment.order_id).where(Payment.checkout_request_id == checkout_request_id)
+            )
+        ).first()
+        if row is None:
+            return UNMATCHED
+        payment_id, order_id = row
+        order, payment = await _lock_order_then_payment(session, order_id, payment_id)
+        if order is None or payment is None:
+            await session.rollback()
+            return UNMATCHED
+
+        result = DUPLICATE
+        changed = False
+        if payment.status in TERMINAL_STATUSES:
+            if (
+                outcome == OUTCOME_SUCCESS
+                and payment.status in (PaymentStatus.FAILED, PaymentStatus.CANCELLED)
+                and order.status != OrderStatus.PAID
+            ):
+                order.status = OrderStatus.NEEDS_RECONCILIATION
+                error = {"reason": "late_success_on_closed_payment", "payment_status": payment.status.value}
+        elif payment.status in (PaymentStatus.INITIATED, PaymentStatus.TIMEOUT) and outcome == OUTCOME_SUCCESS:
+            if amount is not None and _as_decimal(amount) != Decimal(payment.amount):
+                # Never mark anything paid when the confirmed amount differs from what was requested.
+                if payment.status == PaymentStatus.INITIATED:
+                    payment.status = PaymentStatus.FAILED
+                    payment.result_code = result_code
+                    payment.result_desc = AMOUNT_MISMATCH
+                    changed = True
+                if order.status != OrderStatus.PAID:
+                    order.status = OrderStatus.NEEDS_RECONCILIATION
+                error = {"reason": AMOUNT_MISMATCH, "expected": payment.amount, "received": str(amount)}
+                result = MISMATCH
+            else:
+                payment.status = PaymentStatus.COMPLETED
+                payment.result_code = result_code
+                payment.result_desc = result_desc
+                payment.mpesa_receipt_number = receipt
+                payment.completed_at = func.now()
+                _apply_success_to_order(order)
+                changed = True
+                result = APPLIED
+        elif payment.status == PaymentStatus.INITIATED and outcome in _OUTCOME_STATUS:
+            # The order stays payable until it expires; stock is not touched.
+            payment.status = _OUTCOME_STATUS[outcome]
+            payment.result_code = result_code
+            payment.result_desc = result_desc
+            changed = True
+            result = APPLIED
+        # Anything else (a non-success result for a timed-out payment, or an initiating payment) is a duplicate.
+
+        if changed and source == SOURCE_CALLBACK:
+            payment.callback_received_at = func.now()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # For example a receipt number that already belongs to another payment.
+            await session.rollback()
+            error = {"reason": "result_not_applied", "detail": "integrity_error"}
+            result = DUPLICATE
+
+    if error is not None:
+        await log_event(
+            session_factory,
+            "error",
+            {**error, "outcome": outcome, "source": source, "result_code": result_code},
+            payment_id,
+            checkout_request_id,
+        )
+    return result
+
+
+# Callbacks -----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ParsedCallback:
+    checkout_request_id: str
+    merchant_request_id: str | None
+    result_code: int
+    result_desc: str | None
+    amount: object
+    receipt: str | None
+
+    @property
+    def outcome(self) -> str:
+        return outcome_for_result_code(self.result_code)
+
+
+def parse_callback(payload: Any) -> ParsedCallback | None:
+    """Extract the STK callback fields, matching metadata items by Name; the phone number is ignored."""
+    if not isinstance(payload, dict):
+        return None
     body = payload.get("Body")
     callback = body.get("stkCallback") if isinstance(body, dict) else None
     if not isinstance(callback, dict):
-        return {}, {}
+        return None
+    checkout_request_id = callback.get("CheckoutRequestID")
+    result_code = parse_result_code(callback.get("ResultCode"))
+    if not isinstance(checkout_request_id, str) or not checkout_request_id or result_code is None:
+        return None
     metadata = callback.get("CallbackMetadata")
     items = metadata.get("Item") if isinstance(metadata, dict) else None
-    if not isinstance(items, list):
-        items = []
-    values = {str(item.get("Name")): item.get("Value") for item in items if isinstance(item, dict) and "Name" in item}
-    return callback, values
-
-
-async def handle_callback(session: AsyncSession, payload: dict[str, Any]) -> None:
-    """Persist every callback and apply a matching state transition at most once."""
-    callback, metadata = callback_fields(payload)
-    checkout_id = callback.get("CheckoutRequestID")
-    if not isinstance(checkout_id, str):
-        checkout_id = None
-    initial_event = PaymentEvent(
-        payment_id=None,
-        checkout_request_id=checkout_id,
-        event_type="callback",
-        payload=redact(payload),
+    values: dict[str, Any] = {}
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict) and item.get("Name") in ("Amount", "MpesaReceiptNumber"):
+            values[item["Name"]] = item.get("Value")
+    merchant_request_id = callback.get("MerchantRequestID")
+    result_desc = callback.get("ResultDesc")
+    receipt = values.get("MpesaReceiptNumber")
+    return ParsedCallback(
+        checkout_request_id=checkout_request_id,
+        merchant_request_id=merchant_request_id if isinstance(merchant_request_id, str) else None,
+        result_code=result_code,
+        result_desc=str(result_desc)[:255] if result_desc is not None else None,
+        amount=values.get("Amount"),
+        receipt=str(receipt) if receipt not in (None, "") else None,
     )
-    session.add(initial_event)
-    await session.commit()
-    if not checkout_id:
-        return
 
-    payment = await session.scalar(select(Payment).where(Payment.checkout_request_id == checkout_id))
-    if payment is None:
-        return
-    await session.commit()
-    initial_event.payment_id = payment.id
-    await session.commit()
 
-    result_code_value = callback.get("ResultCode")
+async def _apply_callback(session_factory: SessionFactory, parsed: ParsedCallback) -> str:
+    receipt = parsed.receipt if parsed.outcome == OUTCOME_SUCCESS else None
+    amount = parsed.amount if parsed.outcome == OUTCOME_SUCCESS else None
+    if parsed.outcome == OUTCOME_SUCCESS and amount is None:
+        # A success callback must state the amount; a missing one is treated like a mismatch.
+        amount = "missing"
+    return await apply_payment_result(
+        session_factory,
+        parsed.checkout_request_id,
+        parsed.outcome,
+        result_code=parsed.result_code,
+        result_desc=parsed.result_desc,
+        receipt=receipt,
+        amount=amount,
+        source=SOURCE_CALLBACK,
+    )
+
+
+async def process_callback(session_factory: SessionFactory, raw_body: bytes) -> str | None:
+    """Record a Daraja callback and apply it. Never raises for a malformed or unknown callback."""
     try:
-        result_code = int(result_code_value)
-    except (TypeError, ValueError):
-        return
+        payload = json.loads(raw_body, parse_float=Decimal)
+    except (ValueError, UnicodeDecodeError):
+        payload = None
+    parsed = parse_callback(payload)
+    if parsed is None:
+        preview = _mask_long_digits(raw_body[:RAW_BODY_PREVIEW_BYTES].decode("utf-8", "replace"))
+        reason = "malformed_json" if payload is None else "unexpected_callback_shape"
+        await log_event(session_factory, "error", {"reason": reason, "body": preview})
+        return None
 
-    await _apply_callback_result(session, payment, checkout_id, callback, metadata, result_code)
-
-
-async def _apply_callback_result(
-    session: AsyncSession,
-    payment: Payment,
-    checkout_id: str,
-    callback: dict[str, Any],
-    metadata: dict[str, Any],
-    result_code: int,
-) -> None:
-    """Apply a validated callback under the payment's allowed state guard."""
-    if result_code == 0 and not _amount_matches(metadata, payment.amount):
-        session.add(
-            PaymentEvent(
-                payment_id=payment.id,
-                checkout_request_id=checkout_id,
-                event_type="error",
-                payload={
-                    "reason": "callback_amount_mismatch",
-                    "expected": payment.amount,
-                    "received": metadata.get("Amount"),
-                },
-            )
+    event_id = await log_event(session_factory, "callback", payload, checkout_request_id=parsed.checkout_request_id)
+    async with session_factory() as session:
+        payment_id = await session.scalar(
+            select(Payment.id).where(Payment.checkout_request_id == parsed.checkout_request_id)
         )
-        await session.commit()
-        return
-
-    async with session.begin():
-        succeeded = result_code == 0
-        if succeeded:
-            new_status = PaymentStatus.COMPLETED
-        elif result_code == 1032:
-            new_status = PaymentStatus.CANCELLED
-        else:
-            new_status = PaymentStatus.FAILED
-        eligible = Payment.status.in_([PaymentStatus.INITIATING, PaymentStatus.INITIATED])
-        if succeeded:
-            eligible = eligible | (Payment.status == PaymentStatus.TIMEOUT)
-        values: dict[str, Any] = {
-            "status": new_status,
-            "result_code": result_code,
-            "result_desc": callback.get("ResultDesc"),
-            "callback_received_at": datetime.now(UTC),
-        }
-        if succeeded:
-            values["mpesa_receipt_number"] = metadata.get("MpesaReceiptNumber")
-            values["completed_at"] = datetime.now(UTC)
-        result = await session.execute(update(Payment).where(Payment.id == payment.id, eligible).values(**values))
-        if result.rowcount == 1 and succeeded:
-            await _mark_order_paid(session, payment)
+        if payment_id is not None and event_id is not None:
+            await session.execute(
+                update(PaymentEvent)
+                .where(PaymentEvent.id == event_id, PaymentEvent.payment_id.is_(None))
+                .values(payment_id=payment_id)
+            )
+            await session.commit()
+    if payment_id is None:
+        # Kept as an orphan event; rematch_orphan_events applies it once the payment has its checkout id.
+        return UNMATCHED
+    return await _apply_callback(session_factory, parsed)
 
 
-def _amount_matches(metadata: dict[str, Any], expected: int) -> bool:
-    """Check callback amount without accepting missing or malformed values."""
-    try:
-        return Decimal(str(metadata["Amount"])) == Decimal(expected)
-    except (KeyError, TypeError, InvalidOperation, ValueError):
-        return False
+async def rematch_orphan_events(session_factory: SessionFactory, checkout_request_id: str) -> str | None:
+    """Attach callbacks that arrived before the checkout id was saved, and apply the newest one.
 
-
-async def _mark_order_paid(session: AsyncSession, payment: Payment) -> None:
-    """Lock the related order and preserve reconciliation for expired orders."""
-    from sqlalchemy import select
-
-    order = await session.scalar(select(Order).where(Order.id == payment.order_id).with_for_update())
-    if order is not None:
-        if order.status == OrderStatus.EXPIRED:
-            order.status = OrderStatus.NEEDS_RECONCILIATION
-        else:
-            order.status = OrderStatus.PAID
-
-
-async def maybe_reconcile_payment(session: AsyncSession, order: Order) -> None:
-    """Reconcile a stale open payment of ``order`` before it is shown; currently a deliberate no-op.
-
-    ``GET /orders/{id}`` calls this once per request. Module 5 will implement it here: when the
-    order's latest payment is ``initiated`` and older than ``RECONCILE_AFTER_SECONDS``, query the
-    Daraja STK status and apply the result through callback processing. Until then it reads nothing
-    and writes nothing, so order views never touch a payments row.
+    The callback route may attach the same event concurrently, so the update only touches rows whose
+    ``payment_id`` is still null (re-checked by Postgres under the row lock). Rows already attached by
+    the callback route are skipped here, and that route applies their result itself.
     """
-    del session, order
+    async with session_factory() as session:
+        payment_id = await session.scalar(select(Payment.id).where(Payment.checkout_request_id == checkout_request_id))
+        if payment_id is None:
+            return None
+        attached = (
+            await session.execute(
+                update(PaymentEvent)
+                .where(
+                    PaymentEvent.checkout_request_id == checkout_request_id,
+                    PaymentEvent.event_type == "callback",
+                    PaymentEvent.payment_id.is_(None),
+                )
+                .values(payment_id=payment_id)  # the only update payment_events allows: null to a value
+                .returning(PaymentEvent.created_at, PaymentEvent.id, PaymentEvent.payload)
+            )
+        ).all()
+        await session.commit()
+    if not attached:
+        return None
+    newest = max(attached, key=lambda row: (row[0], str(row[1])))[2]
+    parsed = parse_callback(newest)
+    if parsed is None:
+        return None
+    return await _apply_callback(session_factory, parsed)
 
 
-async def reconcile_payment(session: AsyncSession, payment: Payment, client: DarajaClient) -> None:
-    """Query a stale STK request and apply its result through callback processing."""
-    if not payment.checkout_request_id:
+# Reconciliation ------------------------------------------------------------------------------
+
+
+def _viewer_owns(viewer: User, order: Order) -> bool:
+    return str(getattr(viewer.role, "value", viewer.role)) == UserRole.BUYER and viewer.id == order.buyer_id
+
+
+async def _fail_stale_initiating(session_factory: SessionFactory, order_id: UUID, payment_id: UUID) -> None:
+    """Fail an ``initiating`` payment whose STK request was never sent (order locked before payment)."""
+    settings = get_settings()
+    async with session_factory() as session:
+        order, payment = await _lock_order_then_payment(session, order_id, payment_id)
+        db_now = await session.scalar(select(func.now()))
+        if (
+            order is not None
+            and payment is not None
+            and payment.status == PaymentStatus.INITIATING
+            and payment.checkout_request_id is None
+            and db_now - payment.created_at >= timedelta(seconds=settings.mpesa_stale_initiating_seconds)
+        ):
+            payment.status = PaymentStatus.FAILED
+            payment.result_desc = REQUEST_NOT_SENT
+        await session.commit()
+
+
+async def _reconcile(session_factory: SessionFactory, order_id: UUID, client: DarajaClient | None) -> None:
+    settings = get_settings()
+    async with session_factory() as session:
+        latest = (
+            await session.execute(
+                select(Payment.id, Payment.status, Payment.checkout_request_id, Payment.created_at, func.now())
+                .where(Payment.order_id == order_id)
+                .order_by(Payment.created_at.desc(), Payment.id.desc())
+                .limit(1)
+            )
+        ).first()
+    if latest is None:
         return
-    response = await client.stk_query(payment.checkout_request_id)
-    result_code = response.get("ResultCode")
-    if result_code is None:
+    payment_id, payment_status, checkout_request_id, created_at, db_now = latest
+    age = db_now - created_at
+
+    if payment_status == PaymentStatus.INITIATING:
+        if checkout_request_id is None and age >= timedelta(seconds=settings.mpesa_stale_initiating_seconds):
+            await _fail_stale_initiating(session_factory, order_id, payment_id)
         return
-    metadata: list[dict[str, Any]] = []
-    if "MpesaReceiptNumber" in response:
-        metadata.append({"Name": "MpesaReceiptNumber", "Value": response["MpesaReceiptNumber"]})
-    if "Amount" in response:
-        metadata.append({"Name": "Amount", "Value": response["Amount"]})
-    await handle_callback(
-        session,
+    if checkout_request_id is None:
+        return
+    due = (
+        payment_status == PaymentStatus.INITIATED and age >= timedelta(seconds=settings.reconcile_after_seconds)
+    ) or (
+        payment_status == PaymentStatus.TIMEOUT
+        and age < timedelta(minutes=settings.mpesa_timeout_reconcile_window_minutes)
+    )
+    if not due:
+        return
+
+    await rematch_orphan_events(session_factory, checkout_request_id)
+    async with session_factory() as session:
+        current = await session.scalar(select(Payment.status).where(Payment.id == payment_id))
+        since_last_query = await session.scalar(
+            select(func.now() - func.max(PaymentEvent.created_at)).where(
+                PaymentEvent.checkout_request_id == checkout_request_id,
+                PaymentEvent.event_type == "status_query",
+            )
+        )
+    if current not in (PaymentStatus.INITIATED, PaymentStatus.TIMEOUT):
+        return
+    if since_last_query is not None and since_last_query < timedelta(seconds=settings.mpesa_query_min_interval_seconds):
+        return
+    if client is None:
+        return
+
+    try:
+        query = await client.stk_query(checkout_request_id)
+    except DarajaError as exc:
+        # Recorded as a status_query too, so the throttle also spaces out retries while Daraja is failing.
+        await log_event(
+            session_factory,
+            "status_query",
+            {"state": "request_failed", "error": type(exc).__name__},
+            payment_id,
+            checkout_request_id,
+        )
+        await log_event(
+            session_factory,
+            "error",
+            {"reason": "status_query_failed", "error": type(exc).__name__, "message": str(exc)},
+            payment_id,
+            checkout_request_id,
+        )
+        return
+    await log_event(
+        session_factory,
+        "status_query",
         {
-            "Body": {
-                "stkCallback": {
-                    "CheckoutRequestID": payment.checkout_request_id,
-                    "ResultCode": result_code,
-                    "ResultDesc": response.get("ResultDesc", "Status query"),
-                    "CallbackMetadata": {"Item": metadata},
-                }
-            }
+            "state": query.state,
+            "result_code": query.result_code,
+            "description": query.description,
+            "response": query.response,
         },
+        payment_id,
+        checkout_request_id,
+    )
+    if query.state == STATE_PENDING:
+        return
+    # A query result has no receipt and no amount, so the amount comparison is skipped and the
+    # receipt stays null; a later callback cannot add it because a completed payment is final.
+    await apply_payment_result(
+        session_factory,
+        checkout_request_id,
+        query.state,
+        result_code=query.result_code,
+        result_desc=query.description,
+        receipt=None,
+        amount=None,
+        source=SOURCE_QUERY,
     )
 
 
-async def initiate_payment(session: AsyncSession, order_id: UUID, buyer: User, idempotency_key: str) -> Payment:
-    """Start an idempotent sandbox STK request using only persisted order/account values."""
-    settings = get_settings()
-    order = await session.get(Order, order_id)
-    if order is None or order.buyer_id != buyer.id or order.buyer_role != UserRole.BUYER:
-        raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Order not found"})
-    if order.status != OrderStatus.PENDING_PAYMENT or order.expires_at <= datetime.now(UTC):
-        raise HTTPException(
-            status_code=409, detail={"code": "order_not_payable", "message": "Order is not awaiting payment"}
+async def maybe_reconcile_payment(
+    session_factory: SessionFactory, order: Order, viewer: User, client: DarajaClient | None = None
+) -> None:
+    """Bring the latest payment of ``order`` up to date before the owning buyer sees it. Never raises.
+
+    1. A stale ``initiating`` payment without a checkout id is failed (``request_not_sent``).
+    2. An ``initiated`` payment older than ``RECONCILE_AFTER_SECONDS``, or a ``timeout`` payment younger
+       than ``MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES``, first gets orphan callbacks applied, then (at most
+       once per ``MPESA_QUERY_MIN_INTERVAL_SECONDS``) an STK Push Query. No transaction is open during it.
+    Concurrent polls are safe because ``apply_payment_result`` is idempotent. Admin views never reconcile.
+    """
+    if not _viewer_owns(viewer, order):
+        return
+    try:
+        await _reconcile(session_factory, order.id, client)
+    except Exception as exc:  # noqa: BLE001 - an order view must never fail because of reconciliation
+        logger.warning("Payment reconciliation failed: %s", type(exc).__name__)
+        await log_event(session_factory, "error", {"reason": "reconciliation_failed", "error": type(exc).__name__})
+
+
+# Starting a payment --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PaymentStart:
+    message: str
+    stk_target_masked: str
+
+    @property
+    def prompt(self) -> str:
+        return f"Prompt sent to {self.stk_target_masked}"
+
+
+def validate_idempotency_key(raw_key: str | None) -> str:
+    if raw_key is None or not raw_key.strip():
+        raise AppError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "idempotency_key_required",
+            "The Idempotency-Key header is required.",
+        )
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(raw_key):
+        raise AppError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_idempotency_key",
+            "Idempotency-Key must be 8 to 64 characters of A-Z, a-z, 0-9, _ or -.",
+        )
+    return raw_key
+
+
+def stored_idempotency_key(buyer: User, order_id: UUID, raw_key: str) -> str:
+    """Scope the client key to the buyer and order so keys cannot collide or be probed across them."""
+    return f"{buyer.id}:{order_id}:{raw_key}"
+
+
+async def _reserve_payment(
+    session: AsyncSession, settings: Settings, buyer: User, order_id: UUID, key: str
+) -> tuple[Payment, Order] | PaymentStart:
+    """Phase 1, one short transaction: validate the order, then insert an ``initiating`` payment."""
+    existing = await session.scalar(select(Payment).where(Payment.idempotency_key == key))
+    if existing is not None:
+        await session.commit()
+        message = PROMPT_MESSAGE if existing.status in OPEN_STATUSES else "This payment request was already handled."
+        return PaymentStart(message, mask_phone(existing.stk_phone_number))
+
+    # Lock order: the order row first; payments are read and locked after it, listings never.
+    order = await session.scalar(
+        select(Order).where(Order.id == order_id, Order.buyer_id == buyer.id).with_for_update()
+    )
+    if order is None:
+        raise AppError(status.HTTP_404_NOT_FOUND, "order_not_found", "Order not found.")
+    if order.status != OrderStatus.PENDING_PAYMENT:
+        raise AppError(status.HTTP_409_CONFLICT, "order_not_payable", "This order cannot be paid.")
+
+    db_now = await session.scalar(select(func.now()))
+    time_left = order.expires_at - db_now
+    if time_left < timedelta(seconds=settings.mpesa_min_seconds_before_expiry):
+        raise AppError(
+            status.HTTP_409_CONFLICT,
+            "order_expiring",
+            "This order expires too soon to start a payment.",
+            reason="expired" if time_left <= timedelta(0) else "too_close",
         )
 
-    existing = await session.scalar(select(Payment).where(Payment.idempotency_key == idempotency_key))
-    if existing is not None:
-        if existing.order_id != order.id:
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "idempotency_conflict", "message": "Idempotency key was used for another order"},
-            )
-        return existing
-    stk_phone = buyer.phone_number if settings.mpesa_stk_target == "registered" else settings.mpesa_test_msisdn
+    open_payments = (
+        await session.scalars(
+            select(Payment).where(Payment.order_id == order.id, Payment.status.in_(OPEN_STATUSES)).with_for_update()
+        )
+    ).all()
+    stale_after = timedelta(seconds=settings.mpesa_stale_initiating_seconds)
+    for payment in open_payments:
+        if (
+            payment.status == PaymentStatus.INITIATING
+            and payment.checkout_request_id is None
+            and db_now - payment.created_at >= stale_after
+        ):
+            payment.status = PaymentStatus.FAILED
+            payment.result_desc = REQUEST_NOT_SENT
+        else:
+            raise AppError(status.HTTP_409_CONFLICT, "payment_in_progress", "A payment for this order is in progress.")
+    if open_payments:
+        await session.flush()
+
+    attempts = await session.scalar(select(func.count(Payment.id)).where(Payment.order_id == order.id))
+    if (attempts or 0) >= settings.mpesa_max_attempts_per_order:
+        raise AppError(
+            status.HTTP_409_CONFLICT,
+            "max_attempts_reached",
+            "This order has reached the maximum number of payment attempts.",
+        )
+    target = stk_target(settings, buyer)
+    recent = await session.scalar(
+        select(func.count(Payment.id)).where(
+            Payment.stk_phone_number == target, Payment.created_at > func.now() - timedelta(hours=1)
+        )
+    )
+    if (recent or 0) >= settings.mpesa_phone_attempts_per_hour:
+        raise AppError(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too_many_payment_attempts",
+            "Too many payment requests to this phone. Try again later.",
+        )
+
     payment = Payment(
+        id=uuid4(),
         order_id=order.id,
-        idempotency_key=idempotency_key,
+        idempotency_key=key,
         phone_number=buyer.phone_number,
-        stk_phone_number=stk_phone,
+        stk_phone_number=target,
         amount=order.total_amount,
         status=PaymentStatus.INITIATING,
         environment="sandbox",
     )
     session.add(payment)
     try:
+        # Committing releases the order lock before any network call.
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        # payments_one_open_per_order_idx allows one initiating/initiated payment per order.
-        if "payments_one_open_per_order_idx" in str(exc):
-            raise HTTPException(
-                status_code=409,
-                detail={"code": "payment_in_progress", "message": "A payment for this order is already in progress"},
-            ) from exc
+        detail = str(exc.orig)
+        if "payments_one_open_per_order_idx" in detail or "payments_idempotency_key_key" in detail:
+            raise AppError(
+                status.HTTP_409_CONFLICT, "payment_in_progress", "A payment for this order is in progress."
+            ) from None
         raise
-    await session.refresh(payment)
-    session.add(
-        PaymentEvent(
-            payment_id=payment.id,
-            event_type="stk_request",
-            payload=redact({"phone": stk_phone, "amount": payment.amount, "account_reference": order.reference}),
-        )
-    )
+    return payment, order
+
+
+async def _record_push_outcome(
+    session: AsyncSession, order_id: UUID, payment_id: UUID, result: StkPushResult | None, failure: str | None
+) -> None:
+    """Phase 3, a new short transaction: lock the order, then the payment, and store the push outcome."""
+    _, payment = await _lock_order_then_payment(session, order_id, payment_id)
+    if payment is not None and result is not None and failure is None:
+        if payment.status == PaymentStatus.INITIATING:
+            payment.checkout_request_id = result.checkout_request_id
+            payment.merchant_request_id = result.merchant_request_id
+            payment.status = PaymentStatus.INITIATED
+        elif payment.status == PaymentStatus.TIMEOUT and payment.checkout_request_id is None:
+            # The expiry job timed the payment out during the call; keep the ids so a late payment can be matched.
+            payment.checkout_request_id = result.checkout_request_id
+            payment.merchant_request_id = result.merchant_request_id
+    elif payment is not None and payment.status == PaymentStatus.INITIATING:
+        payment.status = PaymentStatus.FAILED
+        payment.result_desc = failure
     await session.commit()
 
-    callback_url = (
-        f"{settings.mpesa_callback_base_url.rstrip('/')}/api/v1/payments/callback/{settings.mpesa_callback_token}"
+
+async def initiate_payment(
+    session: AsyncSession,
+    session_factory: SessionFactory,
+    client: DarajaClient | None,
+    buyer: User,
+    order_id: UUID,
+    raw_key: str,
+) -> PaymentStart:
+    """Start an STK Push for the buyer's order: reserve a payment row, call Daraja, then save the ids.
+
+    The client never supplies an amount, phone number or order data. On a Daraja timeout the prompt may
+    still have been sent, so a duplicate prompt is possible in the sandbox when the buyer retries.
+    """
+    settings = get_settings()
+    require_payments_configured(settings, client)
+    assert client is not None
+    reserved = await _reserve_payment(
+        session, settings, buyer, order_id, stored_idempotency_key(buyer, order_id, raw_key)
     )
-    client = DarajaClient(settings)
+    if isinstance(reserved, PaymentStart):
+        return reserved
+    payment, order = reserved
+    masked_target = mask_phone(payment.stk_phone_number)
+
+    # Phase 2: no transaction is open from here until the Daraja call returns.
+    await log_event(
+        session_factory,
+        "stk_request",
+        {
+            "TransactionType": "CustomerPayBillOnline",
+            "Amount": payment.amount,
+            "PhoneNumber": payment.stk_phone_number,
+            "AccountReference": order.reference,
+            "TransactionDesc": settings.mpesa_transaction_desc,
+        },
+        payment.id,
+    )
+    result: StkPushResult | None = None
+    failure: str | None = None
+    detail: dict[str, Any] = {}
     try:
-        response = await client.stk_push(stk_phone, payment.amount, order.reference, callback_url)
+        result = await client.stk_push(
+            payment.stk_phone_number, payment.amount, order.reference, callback_url(settings)
+        )
+    except DarajaTimeout as exc:
+        failure, detail = REQUEST_UNCONFIRMED, {"error": type(exc).__name__, "message": str(exc)}
     except DarajaError as exc:
-        payment.status = PaymentStatus.FAILED
-        payment.result_desc = str(exc)
-        session.add(PaymentEvent(payment_id=payment.id, event_type="error", payload={"message": str(exc)}))
+        failure, detail = REQUEST_REJECTED, {"error": type(exc).__name__, "message": str(exc)}
     else:
-        session.add(PaymentEvent(payment_id=payment.id, event_type="stk_response", payload=redact(response)))
-        if response.get("ResponseCode") == "0":
-            payment.checkout_request_id = response.get("CheckoutRequestID")
-            payment.merchant_request_id = response.get("MerchantRequestID")
-            payment.result_desc = response.get("ResponseDescription")
-            payment.status = PaymentStatus.INITIATED
-        else:
-            payment.status = PaymentStatus.FAILED
-            payment.result_desc = response.get("ResponseDescription", "Daraja rejected the STK request")
-            session.add(
-                PaymentEvent(payment_id=payment.id, event_type="error", payload={"message": payment.result_desc})
+        if not result.accepted:
+            failure = REQUEST_REJECTED
+            detail = {"description": result.description, "response": result.response}
+
+    await _record_push_outcome(session, order.id, payment.id, result, failure)
+    if failure is not None or result is None:
+        await log_event(session_factory, "error", {"reason": failure, **detail}, payment.id)
+        raise AppError(status.HTTP_502_BAD_GATEWAY, "payment_request_failed", PAYMENT_FAILED_MESSAGE)
+
+    checkout_request_id = result.checkout_request_id
+    await log_event(
+        session_factory,
+        "stk_response",
+        {"request": result.request, "response": result.response},
+        payment.id,
+        checkout_request_id,
+    )
+    if checkout_request_id is not None:
+        try:
+            await rematch_orphan_events(session_factory, checkout_request_id)
+        except Exception as exc:  # noqa: BLE001 - the prompt was sent; reconciliation retries the match later
+            logger.warning("Matching early callbacks failed: %s", type(exc).__name__)
+            await log_event(
+                session_factory,
+                "error",
+                {"reason": "orphan_rematch_failed", "error": type(exc).__name__},
+                payment.id,
+                checkout_request_id,
             )
-    await session.commit()
-    await session.refresh(payment)
-    return payment
+    return PaymentStart(PROMPT_MESSAGE, masked_target)
