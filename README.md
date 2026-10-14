@@ -169,6 +169,10 @@ supabase db push
 
 Get `YOUR_PROJECT_REF` from the Supabase project URL or dashboard. `supabase login` authenticates the CLI account; `supabase link` associates this local checkout with the selected remote project and may prompt for its database password. Enter the password at the prompt rather than putting it in the command. Before confirming `db push`, check that the linked project is the intended target: this command changes the remote schema by applying pending files under `supabase/migrations/`. It does not run `seed.sql`.
 
+### Admin migration (Module 6)
+
+The admin routes need migration `20261015000100_admin_resolution_event.sql`, which allows the `admin_action` payment event type used to record order resolutions. A fresh `supabase db reset` (local) applies it with the others. For an existing hosted project, apply it with `supabase db push` as above (same command on every OS), then run `supabase/verification/admin_event_check.sql` in the Supabase SQL Editor. It works inside a rolled-back transaction and ends with one `PASS` row per check: `admin_action` accepted, unknown event types rejected, deletes still blocked, and callback matching still allowed. Without the migration, resolving an order fails with a database error.
+
 ## 5. Create the initial administrator (optional)
 
 After the database migrations have been applied, set `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, and `SEED_ADMIN_EMAIL` in `.env`. The phone must be a Kenyan mobile number. Either set `SEED_ADMIN_PASSWORD` to a password of at least 12 characters or leave it blank to be prompted twice without echoing it. Then run once per environment:
@@ -394,7 +398,7 @@ In Windows PowerShell, set `$env:ALLOW_CONCURRENCY_CHECK = "1"` first. **Warning
 
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) have service implementations. Admin operations remain placeholders and return `501 Not Implemented`. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
+Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) and the admin APIs (admins and users, listing moderation, order and payment review, reconciliation, statistics and forecast accuracy; see `docs/admin.md`) have service implementations. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
 ## Production start
 
@@ -434,6 +438,8 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES` | How long a timed-out payment is still queried for a late success (default 15). |
 | `MPESA_TRANSACTION_DESC` | STK `TransactionDesc`, at most 13 characters (default `Crop order`). |
 | `CALLBACK_MAX_BYTES` | Largest accepted callback body (default 16384). |
+| `ADMIN_TEMP_PASSWORD_BYTES` | Random bytes in server-generated temporary passwords, 12 to 32 (default 12). |
+| `RESOLVE_NOTE_MIN_LENGTH` | Minimum length of the note when resolving a reconciliation order (default 10). |
 | `ORDER_EXPIRY_MINUTES` | Pending order lifetime and stock reservation, 2 to 30 minutes (default 5). |
 | `RECONCILE_AFTER_SECONDS` | Age after which order reads query Daraja. |
 | `MAX_IMAGE_BYTES` | Maximum listing image upload size. |

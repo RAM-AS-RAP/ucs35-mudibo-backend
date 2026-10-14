@@ -27,17 +27,22 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | POST | `/orders/{id}/cancel` | Owning buyer | Order UUID. | Cancelled `OrderOut`; stock is returned to the listing. |
 | POST | `/orders/{id}/pay` | Owning buyer | `Idempotency-Key` header, empty body. | 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent. |
 | POST | `/payments/callback/{token}` | Daraja only (no authentication) | Daraja STK callback JSON. | 404 with an empty body for a wrong token; otherwise always 200 `{"ResultCode": 0, "ResultDesc": "Accepted"}`. |
-| POST | `/admin/admins` | Super admin | Name, phone, email, temporary password. | Created non-super admin. |
-| GET | `/admin/users` | Admin | Optional role, limit, offset. | Paginated users. |
-| PATCH | `/admin/users/{id}/disable` | Admin | User UUID. | Disabled account. |
-| PATCH | `/admin/users/{id}/enable` | Admin | User UUID. | Enabled account. |
-| GET | `/admin/listings` | Admin | Limit, offset. | Paginated listings. |
-| DELETE | `/admin/listings/{id}` | Admin | Listing UUID. | Soft-removal confirmation. |
-| GET | `/admin/payments` | Admin | Limit, offset. | Paginated payments and order references. |
-| GET | `/admin/stats` | Admin | None | User, listing, order, and sandbox payment aggregates. |
-| GET | `/admin/forecast-accuracy` | Admin | Optional market, crop, horizon. | Accuracy rows and pooled summary. |
+| POST | `/admin/admins` | Super admin | JSON `name`, `phone_number`, `email`. | 201 `UserAdminOut` plus a one-time `temporary_password`. |
+| GET | `/admin/users` | Admin | Optional `role`, `is_disabled`, `q`, `limit`, `offset`. | Paginated `UserAdminOut`, newest first. |
+| PATCH | `/admin/users/{id}/disable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
+| PATCH | `/admin/users/{id}/enable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
+| POST | `/admin/users/{id}/reset-password` | Admin (super admin for admin targets) | Empty body. | One-time `temporary_password`. |
+| GET | `/admin/listings` | Admin | Optional `status`, `crop`, `market`, `farmer_id`, `q`, `limit`, `offset`. | Paginated `AdminListingOut`. |
+| DELETE | `/admin/listings/{id}` | Admin | Listing UUID. | 204; soft removal that cancels unpaid orders. |
+| GET | `/admin/orders` | Admin | Optional `status`, `q`, `limit`, `offset`. | Paginated `AdminOrderOut`. |
+| GET | `/admin/orders/{id}` | Admin | Order UUID. | `AdminOrderOut` with `payments` and `resolution`. |
+| POST | `/admin/orders/{id}/resolve` | Admin | JSON `action`, `note`. | Resolved order. |
+| GET | `/admin/payments` | Admin | Optional `status`, `order_reference`, `environment`, `created_from`, `created_to`, `limit`, `offset`. | Paginated `AdminPaymentOut`. |
+| GET | `/admin/payments/{id}/events` | Admin | Payment UUID. | Event timeline, oldest first, at most 100. |
+| GET | `/admin/stats` | Admin | None | `StatsOut` dashboard counts and pipeline status. |
+| GET | `/admin/forecast-accuracy` | Admin | Optional `market`, `crop`, `horizon`, `is_backfill`, `include_pending`, `limit`, `offset`. | `AccuracyOut` rows and summary. |
 
-Admin services remain placeholders and return `501 not_implemented`. Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
+Admin routes are described in [Admin API](#admin-api) and operated with [admin.md](admin.md). Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
 
 Only markets with published price data are offered (currently Nairobi and Kisumu). Crop values are `maize` or `beans`; forecast horizons are `one_month` or `two_month`. Market/crop values are normalized for case and surrounding whitespace. Unsupported values return 422; no-data markets return 404 `market_not_available`. A forecast is shown only when its origin equals the series' latest price month and that month is no more than two calendar months old in `Africa/Nairobi`; otherwise it returns 404 `forecast_unavailable` with reason `no_forecast` or `stale`. Prices and forecasts are read from stored pipeline output; this API does not invent or compute them.
 
@@ -336,6 +341,155 @@ Errors:
 ### `POST /payments/callback/{token}`
 
 Called by Daraja only, never by the PWA. There is no bearer authentication: the secret `MPESA_CALLBACK_TOKEN` in the path is the check, and a wrong token returns 404 with an empty body. Bodies over `CALLBACK_MAX_BYTES` (default 16384) return 413. After a valid token the endpoint always returns 200 with `{"ResultCode": 0, "ResultDesc": "Accepted"}`, also for malformed, unknown, duplicate or mismatched callbacks, so Daraja never retries. Every callback is stored as a payment event first. The phone number in the callback is ignored. There is no rate limit on this route. The server access log shows the path as `/api/v1/payments/callback/***`.
+
+## Admin API
+
+All routes are under `/api/v1/admin` and require an admin account; the role is read from the database on every request. Every route returns 401 without a valid token, 403 `forbidden` for farmers and buyers, and 403 `password_change_required` until a temporary password has been changed. Pagination uses `limit` (1-100, default 20) and `offset`, and returns `{items, total, limit, offset}`. Search `q` is 2 to 50 characters; `%` and `_` match literally.
+
+Rate limits per IP: `POST /admin/admins` and `POST /admin/users/{id}/reset-password` 10 per hour; disable, enable, listing removal and order resolution 30 per hour (429 `rate_limited`).
+
+Admin responses never contain password hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes.
+
+### Status and error codes
+
+| Route | Success | Errors |
+| --- | --- | --- |
+| `POST /admin/admins` | 201 | 403 `forbidden` (not the super admin); 409 `conflict` (duplicate phone or email, one generic message); 422 `validation_error` |
+| `GET /admin/users` | 200 | 422 `validation_error` |
+| `PATCH /admin/users/{id}/disable`, `/enable` | 200 | 403 `cannot_modify_super_admin`, `cannot_disable_self`, `forbidden` (ordinary admin on an admin); 404 `user_not_found`; 422 `body_not_allowed` |
+| `POST /admin/users/{id}/reset-password` | 200 | 403 `cannot_modify_super_admin`, `forbidden`; 404 `user_not_found`; 422 `body_not_allowed` |
+| `GET /admin/listings` | 200 | 422 `validation_error` |
+| `DELETE /admin/listings/{id}` | 204 (also when already removed) | 404 `listing_not_found`; 409 `listing_has_open_payments` |
+| `GET /admin/orders`, `GET /admin/orders/{id}` | 200 | 404 `order_not_found` |
+| `POST /admin/orders/{id}/resolve` | 200 | 404 `order_not_found`; 409 `order_not_in_reconciliation`, `reconciliation_context_missing`, `insufficient_stock_to_confirm`; 422 `validation_error` |
+| `GET /admin/payments` | 200 | 422 `validation_error` |
+| `GET /admin/payments/{id}/events` | 200 | 404 `payment_not_found` |
+| `GET /admin/stats`, `GET /admin/forecast-accuracy` | 200 | 422 `validation_error` |
+
+### Users
+
+`POST /admin/admins` (super admin only). Body, unknown fields rejected:
+
+```json
+{"name": "Grace Admin", "phone_number": "0712000001", "email": "grace@example.com"}
+```
+
+The server sets `role=admin`, `is_super_admin=false`, `must_change_password=true` and `created_by`, and generates the temporary password (`ADMIN_TEMP_PASSWORD_BYTES`, default 12 random bytes). The response has `Cache-Control: no-store`; the password is shown only here and is never stored or logged in plain text:
+
+```json
+{
+	"id": "6f1c0e8a-2b44-4c55-9a1e-6c2f8d0b7e11",
+	"name": "Grace Admin",
+	"phone_number": "254712000001",
+	"email": "grace@example.com",
+	"role": "admin",
+	"is_super_admin": false,
+	"is_disabled": false,
+	"disabled_at": null,
+	"disabled_by_name": null,
+	"must_change_password": true,
+	"created_at": "2026-10-15T09:00:00Z",
+	"created_by_name": "Super Admin",
+	"listing_count": null,
+	"order_count": null,
+	"temporary_password": "q3J8vX0bTzR1mN5w"
+}
+```
+
+`GET /admin/users` filters by `role`, `is_disabled` and `q` (case-insensitive name or email, or a phone-number prefix such as `0712`). Items are `UserAdminOut` as above without `temporary_password`; `listing_count` is set for farmers and `order_count` for buyers, otherwise null.
+
+`PATCH /admin/users/{id}/disable` sets `is_disabled`, `disabled_at` and `disabled_by`; `enable` clears all three. Neither applies to the super admin or to yourself, and only the super admin can disable or enable another admin. Repeating a call returns 200 unchanged. A disabled user's next request returns 401.
+
+`POST /admin/users/{id}/reset-password` returns `{"temporary_password": "..."}` once (with `Cache-Control: no-store`) and forces a password change. The super admin's password cannot be reset here, and only the super admin can reset another admin. Existing access tokens stay valid until they expire (`ACCESS_TOKEN_EXPIRE_MINUTES`, 60 by default), because tokens carry no password version.
+
+### Listings
+
+`GET /admin/listings` returns `AdminListingOut`: `id, farmer_id, farmer_name, farmer_disabled, crop, market, quantity_available, unit, price_per_unit, image_url, status, removed_at, removed_by_name, pending_orders, paid_orders, created_at`. `q` matches the farmer's name.
+
+`DELETE /admin/listings/{id}` soft-removes the listing: its `pending_payment` orders are cancelled and their quantities returned, then the listing becomes `removed` with `removed_at` and `removed_by`. No row or image is deleted. While a buyer is paying for one of those orders (an `initiating` or `initiated` payment) it returns 409 `listing_has_open_payments`; try again after `ORDER_EXPIRY_MINUTES`.
+
+Listings of a disabled farmer are hidden from buyers (`GET /listings` excludes them; `GET /listings/{id}` and `POST /orders` return 404 `listing_not_found`) and reappear when the farmer is enabled.
+
+### Orders and payments
+
+`GET /admin/orders` filters by `status` and `q` (order reference prefix or buyer name). `AdminOrderOut`:
+
+```json
+{
+	"id": "123e4567-e89b-12d3-a456-426614174009",
+	"reference": "K7QX2MPA",
+	"status": "needs_reconciliation",
+	"buyer_name": "Buyer Ann",
+	"seller_name": "Jane Wanjiku",
+	"listing_id": "123e4567-e89b-12d3-a456-426614174000",
+	"crop": "maize",
+	"market": "Nairobi",
+	"quantity": 2.5,
+	"unit_price": 45.5,
+	"total_amount": 114,
+	"created_at": "2026-10-15T09:00:00Z",
+	"expires_at": "2026-10-15T09:05:00Z",
+	"latest_payment_status": "completed",
+	"latest_mpesa_receipt_number": "SBX1A2B3C4",
+	"reconciliation": {
+		"reason": "late_success_after_expiry",
+		"order_status_before": "expired",
+		"flagged_at": "2026-10-15T09:06:10Z"
+	},
+	"resolution": null
+}
+```
+
+`reconciliation` is set only for `needs_reconciliation` orders, from the latest `error` payment event that records `order_status_before`. Reasons: `late_success_after_expiry`, `success_on_closed_order`, `success_on_closed_payment`, `amount_mismatch`.
+
+`GET /admin/orders/{id}` adds `payments` (each `id, status, amount, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at`) and `resolution` (`{action, note, admin_name, created_at}` from the latest `admin_action` event) when one exists.
+
+`POST /admin/orders/{id}/resolve` body, unknown fields rejected:
+
+```json
+{"action": "confirm_sale", "note": "Buyer showed the M-Pesa confirmation message."}
+```
+
+`action` is `confirm_sale` or `void_order`; `note` is `RESOLVE_NOTE_MIN_LENGTH` (default 10) to 500 characters. Only `needs_reconciliation` orders can be resolved, so a repeated request returns 409 `order_not_in_reconciliation`. Stock depends on the order status before it was flagged:
+
+| Action | Flagged while `pending_payment` (stock still reserved) | Flagged after `expired` or `cancelled` (stock returned) | Order becomes |
+| --- | --- | --- | --- |
+| `confirm_sale` | no stock change | quantity re-reserved; 409 `insufficient_stock_to_confirm` if not enough is left | `paid` |
+| `void_order` | quantity returned to the listing | no stock change | `cancelled` |
+
+A removed listing is never changed. Payment rows are left as they are; a voided sale's refund is arranged outside the platform. The resolution is recorded as an `admin_action` payment event in the same transaction, and the response is the order detail with `resolution`.
+
+`GET /admin/payments` filters by `status`, `order_reference` (exact), `environment` (`sandbox` or `production`), and `created_from` / `created_to` (dates in Africa/Nairobi). Items: `id, order_id, order_reference, order_status, buyer_name, amount, status, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at, attempt_number`.
+
+`GET /admin/payments/{id}/events` returns `{payment_id, items, limit}` where each item is `{id, event_type, checkout_request_id, payload, created_at}`, oldest first, at most 100. Payloads were redacted when stored and are returned unchanged.
+
+### Statistics
+
+`GET /admin/stats`:
+
+```json
+{
+	"users": {"farmers": 12, "buyers": 30, "admins": 2, "disabled": 1},
+	"listings": {"active": 9, "sold_out": 3, "removed": 1},
+	"orders": {"pending_payment": 1, "paid": 20, "payment_failed": 0, "expired": 6, "cancelled": 2, "needs_reconciliation": 1},
+	"payments": {"initiating": 0, "initiated": 1, "completed": 21, "failed": 3, "cancelled": 2, "timeout": 4},
+	"completed_sandbox_amount_kes": 2394,
+	"attention": {"orders_needing_reconciliation": 1, "payments_initiated_over_10_minutes": 0},
+	"pipeline": {
+		"series": [
+			{"market": "Nairobi", "crop": "maize", "latest_price_month": "2026-09-01", "forecast_origin_month": "2026-09-01", "forecast_current": true}
+		],
+		"last_prices_fetch": "2026-10-02T06:00:00Z",
+		"last_forecast_generated": "2026-10-02T06:10:00Z"
+	}
+}
+```
+
+Every status appears, with 0 when there are none. `completed_sandbox_amount_kes` sums completed sandbox payments only. `pipeline.series` has one row per market with price data and crop; `forecast_current` is true when the latest one-month forecast's origin equals the latest price month.
+
+### Forecast accuracy
+
+`GET /admin/forecast-accuracy` filters by `market`, `crop`, `horizon`, `is_backfill` and `include_pending` (default true), ordered by `origin_month` then `target_month`, newest first. `items` are rows of the `forecast_accuracy` view (`market, crop, horizon, origin_month, target_month, origin_price, predicted_price, actual_price, abs_error, pct_error, actual_log_change, direction_correct, persistence_abs_error, beat_persistence, is_backfill, is_pending`); error columns are null while a row is pending. `summary` has one entry per `(horizon, is_backfill)` with `n_realised`, `n_pending`, `mape` (mean absolute percentage error), `mean_abs_error`, `directional_accuracy` and `beat_persistence_rate` (shares from 0 to 1), computed over realised rows and rounded to 2 decimals. `note` explains that backfilled forecasts are reported separately and that sample sizes are small.
 
 ## Authentication details
 
