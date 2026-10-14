@@ -42,3 +42,28 @@ def test_farmer_listing_and_image_settings_have_documented_defaults(valid_settin
     assert settings.max_active_listings_per_farmer == 50
     assert settings.image_max_dimension == 1600
     assert settings.image_jpeg_quality == 85
+
+
+def test_order_settings_have_documented_defaults(valid_settings) -> None:
+    settings = Settings(**valid_settings)
+    assert settings.min_order_quantity == 1
+    assert settings.min_order_total_kes == 10
+    assert settings.max_pending_orders_per_buyer == 3
+    assert settings.order_reference_length == 8
+    assert settings.order_expiry_minutes == 5
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("order_reference_length", 5),
+        ("order_reference_length", 13),
+        ("order_expiry_minutes", 1),
+        ("order_expiry_minutes", 31),
+        ("min_order_quantity", 0),
+        ("max_pending_orders_per_buyer", 0),
+    ],
+)
+def test_order_settings_are_validated_at_startup(valid_settings, field, value) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{**valid_settings, field: value})

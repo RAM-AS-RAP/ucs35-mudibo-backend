@@ -1,5 +1,6 @@
 """Validated application settings."""
 
+from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
     max_active_listings_per_farmer: int = 50
     image_max_dimension: int = 1600
     image_jpeg_quality: int = 85
+    min_order_quantity: Decimal = Decimal("1")
+    min_order_total_kes: int = 10
+    max_pending_orders_per_buyer: int = 3
+    order_reference_length: int = 8
     seed_admin_name: str = ""
     seed_admin_phone: str = ""
     seed_admin_email: str = ""
@@ -77,6 +82,34 @@ class Settings(BaseSettings):
     def validate_image_jpeg_quality(cls, value: int) -> int:
         if not 1 <= value <= 95:
             raise ValueError("IMAGE_JPEG_QUALITY must be between 1 and 95")
+        return value
+
+    @field_validator("order_expiry_minutes")
+    @classmethod
+    def validate_order_expiry(cls, value: int) -> int:
+        if not 2 <= value <= 30:
+            raise ValueError("ORDER_EXPIRY_MINUTES must be between 2 and 30")
+        return value
+
+    @field_validator("order_reference_length")
+    @classmethod
+    def validate_order_reference_length(cls, value: int) -> int:
+        if not 6 <= value <= 12:
+            raise ValueError("ORDER_REFERENCE_LENGTH must be between 6 and 12")
+        return value
+
+    @field_validator("min_order_quantity")
+    @classmethod
+    def validate_min_order_quantity(cls, value: Decimal) -> Decimal:
+        if not value.is_finite() or value <= 0:
+            raise ValueError("MIN_ORDER_QUANTITY must be greater than zero")
+        return value
+
+    @field_validator("min_order_total_kes", "max_pending_orders_per_buyer")
+    @classmethod
+    def validate_positive_order_limits(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Order limits must be positive")
         return value
 
     @field_validator("mpesa_env")
