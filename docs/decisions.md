@@ -15,3 +15,11 @@
 - Forecasts with stale origins are hidden rather than shown against old price data.
 - Farmer order history omits buyer contact details and exposes only the buyer's name.
 - `quantity_available` means stock currently available after order reservations have been deducted.
+- Order totals are computed on the server as `ceil(quantity × unit_price)` in `Decimal` (whole shillings); clients never send a price or total.
+- Order `expires_at` is set from the database clock (`now()` + `ORDER_EXPIRY_MINUTES`), never the application clock.
+- Lock order: wherever an order and a listing are both locked, the order is locked first (matching `expire_stale_orders()`); checkout locks only the listing before inserting the new order.
+- A second pending order by the same buyer for the same listing is rejected with `pending_order_exists` (returning the existing order id), not merged.
+- Orders require at least `MIN_ORDER_QUANTITY` (default 1 kg) and a total of at least `MIN_ORDER_TOTAL_KES` (default 10).
+- Buyers see the seller's name on listings and orders, but never the farmer's id, phone number, or email.
+- Only a `pending_payment` order without an open payment can be cancelled; cancelling returns stock and is idempotent. Module 5's pay endpoint must lock the order row `FOR UPDATE` before inserting a payment and check that it is `pending_payment` and not expired, rather than relying on the payment insert trigger.
+- Admins may read a single order (`GET /orders/{id}`) but cannot act on it; `can_pay` and `can_cancel` are always false for them.
