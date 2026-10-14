@@ -1,11 +1,15 @@
 """Validated application settings."""
 
+import re
 from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_URL_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
+_PHONE = re.compile(r"254[17][0-9]{8}")
 
 
 class Settings(BaseSettings):
@@ -34,6 +38,14 @@ class Settings(BaseSettings):
     mpesa_callback_token: str = ""
     mpesa_stk_target: Literal["registered", "test_msisdn"] = "registered"
     mpesa_test_msisdn: str = "254708374149"
+    mpesa_max_attempts_per_order: int = 3
+    mpesa_min_seconds_before_expiry: int = 90
+    mpesa_stale_initiating_seconds: int = 60
+    mpesa_phone_attempts_per_hour: int = 5
+    mpesa_query_min_interval_seconds: int = 20
+    mpesa_timeout_reconcile_window_minutes: int = 15
+    mpesa_transaction_desc: str = "Crop order"
+    callback_max_bytes: int = 16384
     order_expiry_minutes: int = 5
     reconcile_after_seconds: int = 90
     max_image_bytes: int = 5_242_880
@@ -125,6 +137,58 @@ class Settings(BaseSettings):
         if value != "https://sandbox.safaricom.co.ke":
             raise ValueError("MPESA_BASE_URL must be the Daraja sandbox URL")
         return value
+
+    @field_validator("mpesa_callback_token")
+    @classmethod
+    def validate_callback_token(cls, value: str) -> str:
+        # Empty is allowed so non-payment routes and tests still start; payment routes then return 503.
+        if value and (len(value) < 24 or not _URL_SAFE_TOKEN.fullmatch(value)):
+            raise ValueError("MPESA_CALLBACK_TOKEN must be at least 24 URL-safe characters (A-Z, a-z, 0-9, _ and -)")
+        return value
+
+    @field_validator("mpesa_test_msisdn")
+    @classmethod
+    def validate_test_msisdn(cls, value: str) -> str:
+        if value and not _PHONE.fullmatch(value):
+            raise ValueError("MPESA_TEST_MSISDN must match 254[17]XXXXXXXX")
+        return value
+
+    @field_validator("mpesa_transaction_desc")
+    @classmethod
+    def validate_transaction_desc(cls, value: str) -> str:
+        if not 1 <= len(value) <= 13:
+            raise ValueError("MPESA_TRANSACTION_DESC must be 1 to 13 characters")
+        return value
+
+    @field_validator(
+        "mpesa_max_attempts_per_order",
+        "mpesa_min_seconds_before_expiry",
+        "mpesa_stale_initiating_seconds",
+        "mpesa_phone_attempts_per_hour",
+        "mpesa_query_min_interval_seconds",
+        "mpesa_timeout_reconcile_window_minutes",
+        "callback_max_bytes",
+        "reconcile_after_seconds",
+    )
+    @classmethod
+    def validate_positive_payment_limits(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("Payment limits must be positive")
+        return value
+
+    @property
+    def payments_configured(self) -> bool:
+        """Report whether every setting a payment endpoint needs is present and usable."""
+        required = (
+            self.mpesa_consumer_key,
+            self.mpesa_consumer_secret,
+            self.mpesa_passkey,
+            self.mpesa_callback_token,
+            self.mpesa_shortcode,
+        )
+        if not all(required) or not self.mpesa_callback_base_url.startswith("https://"):
+            return False
+        return self.mpesa_stk_target != "test_msisdn" or bool(self.mpesa_test_msisdn)
 
     @property
     def cors_origin_list(self) -> list[str]:

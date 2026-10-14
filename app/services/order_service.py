@@ -7,10 +7,11 @@ listing row (``SELECT ... FOR UPDATE``) and then inserts a new order row, which 
 hold a lock on yet. Never lock a listing and then an existing order: that is the opposite order and
 can deadlock against cancel or the expiry job.
 
-Module 5's pay endpoint must lock the order row ``FOR UPDATE`` before inserting a payment and must
-check that the order is ``pending_payment`` and not expired. The API must not rely on the payment
-insert trigger for this: the trigger checks only the status (not ``expires_at``), and locking the
-order first is what serializes payment creation against a concurrent cancel or expiry.
+The pay endpoint (``payment_service.initiate_payment``) locks the order row ``FOR UPDATE`` before
+inserting a payment and checks that the order is ``pending_payment`` with enough time left. It does
+not rely on the payment insert trigger for this: the trigger checks only the status (not
+``expires_at``), and locking the order first is what serializes payment creation against a
+concurrent cancel or expiry. The full lock order is orders, then payments, then listings.
 """
 
 from __future__ import annotations
@@ -35,8 +36,15 @@ from app.models.order import Order
 from app.models.payment import Payment
 from app.models.user import User
 from app.schemas.common import Pagination
-from app.schemas.order import OrderListingSummary, OrderOut, OrderPage, OrderPaymentSummary
+from app.schemas.order import (
+    PAYMENT_STATUS_MESSAGES,
+    OrderListingSummary,
+    OrderOut,
+    OrderPage,
+    OrderPaymentSummary,
+)
 from app.services import payment_service
+from app.utils.phone import mask_phone
 
 REFERENCE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 REFERENCE_ATTEMPTS = 5
@@ -171,6 +179,7 @@ ORDER_VIEW_COLUMNS = """
     latest_payment.status as payment_status,
     latest_payment.mpesa_receipt_number,
     latest_payment.result_desc,
+    latest_payment.stk_phone_number as payment_stk_phone_number,
     latest_payment.completed_at as payment_completed_at,
     payment_counts.attempts as payment_attempts,
     payment_counts.open_payments > 0 as has_open_payment,
@@ -182,10 +191,10 @@ ORDER_VIEW_JOINS = """
     join public.produce_listings as l on l.id = o.listing_id
     join public.users as seller on seller.id = l.farmer_id
     left join lateral (
-        select p.status, p.mpesa_receipt_number, p.result_desc, p.completed_at
+        select p.status, p.mpesa_receipt_number, p.result_desc, p.stk_phone_number, p.completed_at
         from public.payments as p
         where p.order_id = o.id
-        order by p.created_at desc
+        order by p.created_at desc, p.id desc
         limit 1
     ) as latest_payment on true
     cross join lateral (
@@ -200,15 +209,23 @@ ORDER_VIEW_JOINS = """
 
 def _order_out(row: Any, viewer: User) -> OrderOut:
     """Build the order view, deriving expiry and permitted actions from database values."""
+    settings = get_settings()
     order_status = str(row["status"])
     pending = order_status == OrderStatus.PENDING_PAYMENT
     is_expired = pending and row["expires_at"] <= row["server_time"]
     has_open_payment = bool(row["has_open_payment"])
     is_owner = str(getattr(viewer.role, "value", viewer.role)) == UserRole.BUYER and viewer.id == row["buyer_id"]
+    enough_time_to_pay = row["expires_at"] - row["server_time"] >= timedelta(
+        seconds=settings.mpesa_min_seconds_before_expiry
+    )
+    attempts_left = int(row["payment_attempts"] or 0) < settings.mpesa_max_attempts_per_order
     payment = None
     if row["payment_status"] is not None:
+        payment_status = str(row["payment_status"])
         payment = OrderPaymentSummary(
-            status=str(row["payment_status"]),
+            status=payment_status,
+            status_message=PAYMENT_STATUS_MESSAGES.get(payment_status, payment_status),
+            stk_target_masked=mask_phone(row.get("payment_stk_phone_number")),
             mpesa_receipt_number=row["mpesa_receipt_number"],
             result_desc=row["result_desc"],
             completed_at=row["payment_completed_at"],
@@ -225,7 +242,12 @@ def _order_out(row: Any, viewer: User) -> OrderOut:
         expires_at=row["expires_at"],
         server_time=row["server_time"],
         created_at=row["created_at"],
-        can_pay=is_owner and pending and not is_expired and not has_open_payment,
+        can_pay=is_owner
+        and pending
+        and not is_expired
+        and enough_time_to_pay
+        and not has_open_payment
+        and attempts_left,
         can_cancel=is_owner and pending and not has_open_payment,
         listing=OrderListingSummary(
             id=row["listing_id"],
@@ -290,13 +312,31 @@ async def list_my_orders(
     )
 
 
-async def get_order(session: AsyncSession, order_id: UUID, viewer: User) -> OrderOut:
-    """Return an order to its owning buyer or, read only, to an admin."""
+async def order_view(session: AsyncSession, order_id: UUID, viewer: User) -> OrderOut:
+    """Return the order view without reconciling its payment (used by the pay endpoint)."""
+    return await _fetch_order_view(session, order_id, viewer)
+
+
+async def get_order(
+    session: AsyncSession,
+    order_id: UUID,
+    viewer: User,
+    *,
+    session_factory: payment_service.SessionFactory | None = None,
+    daraja_client: Any = None,
+) -> OrderOut:
+    """Return an order to its owning buyer or, read only, to an admin.
+
+    For the owning buyer the latest payment is reconciled first. The read transaction is ended before
+    that, so no transaction is open while reconciliation calls Daraja; admins never trigger it.
+    """
     order = await session.scalar(select(Order).where(Order.id == order_id))
     is_admin = str(getattr(viewer.role, "value", viewer.role)) == UserRole.ADMIN
     if order is None or (not is_admin and order.buyer_id != viewer.id):
         raise AppError(status.HTTP_404_NOT_FOUND, "order_not_found", "Order not found.")
-    await payment_service.maybe_reconcile_payment(session, order)
+    if not is_admin and session_factory is not None:
+        await session.commit()
+        await payment_service.maybe_reconcile_payment(session_factory, order, viewer, daraja_client)
     return await _fetch_order_view(session, order.id, viewer)
 
 

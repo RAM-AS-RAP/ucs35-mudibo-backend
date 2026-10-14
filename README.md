@@ -199,6 +199,169 @@ With the API running and `APP_ENV=development`, open **http://127.0.0.1:8000/doc
 
 To call protected endpoints, use `POST /api/v1/auth/login` with an existing account. Click **Authorize** in Swagger and enter the returned access token. The `/auth/register/farmer` and `/auth/register/buyer` routes can create farmer and buyer accounts when the database is available. An admin must be created with the seed step above.
 
+## 8. M-Pesa Daraja sandbox and ngrok setup
+
+Payments use the Safaricom Daraja **sandbox** only (shortcode `174379`); no real money moves. The API starts without these settings, and `POST /orders/{id}/pay` returns 503 `payments_unavailable` until they are complete. Daraja sends the payment result to a public HTTPS callback URL, so during local development an ngrok tunnel forwards that URL to the API on port 8000.
+
+### 8.1 Create a Daraja sandbox app
+
+1. Sign up and log in at https://developer.safaricom.co.ke.
+2. Open **My Apps**, create a sandbox app, and enable **Lipa Na M-Pesa Sandbox** (M-Pesa Express).
+3. Copy the app's **Consumer Key** and **Consumer Secret**.
+4. Open the M-Pesa Express simulator or **Test Credentials** page and copy the sandbox **Passkey** for shortcode `174379`.
+
+### 8.2 Install ngrok
+
+Create a free account at https://dashboard.ngrok.com/signup first.
+
+Windows PowerShell:
+
+```powershell
+winget install ngrok.ngrok
+```
+
+macOS (Homebrew):
+
+```bash
+brew install ngrok
+```
+
+Linux (snap; on other distributions download the agent from https://ngrok.com/download):
+
+```bash
+sudo snap install ngrok
+```
+
+Close and reopen the terminal (on Windows, restart VS Code completely) so the new PATH entry is picked up, then check the version on any OS:
+
+```bash
+ngrok version
+```
+
+Free accounts need agent version **3.20.0 or newer**; older agents fail with `ERR_NGROK_121`. WinGet can install an old version, so update in place if needed (same command on every OS):
+
+```bash
+ngrok update
+```
+
+### 8.3 Connect ngrok to your account and claim a static domain
+
+1. Copy your authtoken from https://dashboard.ngrok.com/get-started/your-authtoken and save it (same command on every OS):
+
+   ```bash
+   ngrok config add-authtoken <your-ngrok-authtoken>
+   ```
+
+2. In the ngrok dashboard, open **Domains** and claim the free static domain, for example `your-name.ngrok-free.app`. It stays the same on every restart, so `.env` only needs setting once.
+
+### 8.4 Generate the callback token
+
+The callback token is the secret path segment that proves a callback came through your configured URL. Generate one with the activated virtual environment (same command on every OS):
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Treat it like a password: anyone with the full callback URL can send fake callbacks.
+
+### 8.5 Configure `.env`
+
+Set these values in `.env` (never in `.env.example`):
+
+```dotenv
+MPESA_ENV=sandbox
+MPESA_BASE_URL=https://sandbox.safaricom.co.ke
+MPESA_CONSUMER_KEY=<consumer key from 8.1>
+MPESA_CONSUMER_SECRET=<consumer secret from 8.1>
+MPESA_SHORTCODE=174379
+MPESA_PASSKEY=<sandbox passkey from 8.1>
+MPESA_CALLBACK_BASE_URL=https://your-name.ngrok-free.app
+MPESA_CALLBACK_TOKEN=<token from 8.4>
+MPESA_STK_TARGET=test_msisdn
+MPESA_TEST_MSISDN=254708374149
+```
+
+- `MPESA_CALLBACK_BASE_URL` must start with `https://` and has no trailing path; the API appends `/api/v1/payments/callback/<token>` itself.
+- `MPESA_STK_TARGET=test_msisdn` sends every prompt to the sandbox test number. Use `registered` (the `.env.example` default) to send it to the buyer's registered phone instead.
+- The other `MPESA_*` limits are optional; see [Environment reference](#environment-reference).
+
+### 8.6 Start the API and the tunnel
+
+Terminal 1, the API (activate the virtual environment first, as in step 2):
+
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Terminal 2, the tunnel (same command on every OS):
+
+```bash
+ngrok http --url=your-name.ngrok-free.app 8000
+```
+
+ngrok shows `Forwarding https://your-name.ngrok-free.app -> http://localhost:8000`. Only one tunnel can use the domain at a time. Restart the API after every `.env` change, because settings are cached.
+
+### 8.7 Check the tunnel
+
+Windows PowerShell:
+
+```powershell
+Invoke-RestMethod https://your-name.ngrok-free.app/api/v1/health -Headers @{"ngrok-skip-browser-warning" = "1"}
+```
+
+macOS or Linux:
+
+```bash
+curl -H "ngrok-skip-browser-warning: 1" https://your-name.ngrok-free.app/api/v1/health
+```
+
+Both should return `{"status":"ok"}`. In a browser, the free domain first shows an ngrok warning page; Daraja's server-to-server callbacks are not affected by it.
+
+### 8.8 Make a test payment
+
+1. Open http://127.0.0.1:8000/docs, log in as a buyer with `POST /api/v1/auth/login`, and click **Authorize** with the access token.
+2. Create an order with `POST /api/v1/orders`. An order expires after `ORDER_EXPIRY_MINUTES` (default 5), and a payment must start with at least 90 seconds left.
+3. Call `POST /api/v1/orders/{id}/pay` with an `Idempotency-Key` header (8 to 64 characters of `A-Z a-z 0-9 _ -`, for example `test-pay-0001`) and **no body**. Use a new key for each new attempt; repeating a key replays the first response.
+
+   The same call from a terminal, with `$TOKEN`/`$ORDER_ID` replaced by your values.
+
+   Windows PowerShell:
+
+   ```powershell
+   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -Headers @{ Authorization = "Bearer $TOKEN"; "Idempotency-Key" = "test-pay-0001" }
+   ```
+
+   macOS or Linux:
+
+   ```bash
+   curl -X POST "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: test-pay-0001"
+   ```
+
+4. A 202 response contains `"prompt": "Prompt sent to 254*******149"`. Poll `GET /api/v1/orders/{id}`: the payment moves from `initiated` to `completed` and the order to `paid` when Daraja calls back.
+5. Watch the callback arrive in the ngrok inspector at http://127.0.0.1:4040 and in the `payments` and `payment_events` tables. The API log shows the callback path as `/api/v1/payments/callback/***`, never the token.
+
+If no callback arrives, the next `GET /orders/{id}` after `RECONCILE_AFTER_SECONDS` (default 90) asks Daraja for the status instead. If the sandbox never calls back, send a simulated callback using the payment's `checkout_request_id` from the `payments` table (same commands on every OS):
+
+```bash
+python -m scripts.simulate_callback --checkout-request-id ws_CO_... --amount <order total>
+python -m scripts.simulate_callback --checkout-request-id ws_CO_... --result-code 1032
+```
+
+The script reads the token from `.env`, refuses to run unless `MPESA_ENV=sandbox` and `APP_ENV` is not `production`, and never prints the token. A simulated callback is not a Daraja result: never present it as a real M-Pesa confirmation in a demonstration.
+
+### 8.9 Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `ngrok` is not recognized | The terminal started before ngrok was installed. Reopen it (on Windows, restart VS Code completely). |
+| `ERR_NGROK_121` (agent version too old) | Run `ngrok update`, then `ngrok version` should show 3.20.0 or newer. |
+| `You must specify a single argument` | Pass the domain with `--url=` and only the port as the argument: `ngrok http --url=your-name.ngrok-free.app 8000`. |
+| `ERR_NGROK_334` (endpoint already online) | Another tunnel is using the domain. Stop it, or end it in the ngrok dashboard. |
+| 503 `payments_unavailable` | A Daraja credential, the callback token, or an `https://` `MPESA_CALLBACK_BASE_URL` is missing. Fix `.env` and restart the API. |
+| 409 `order_expiring` | Fewer than 90 seconds remain on the order. Create a new order. |
+| 502 `payment_request_failed` | Daraja rejected the request or timed out. Check the credentials and passkey, wait a few seconds, and retry with a new `Idempotency-Key`. |
+| Payment stays `initiated` | No callback arrived. Check that the tunnel is running and the inspector shows the request; poll `GET /orders/{id}` to trigger a status query, or use the simulator. |
+
 ## Tests and code checks
 
 With the virtual environment active:
@@ -231,7 +394,7 @@ In Windows PowerShell, set `$env:ALLOW_CONCURRENCY_CHECK = "1"` first. **Warning
 
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and payment callback handling have service implementations. The order pay endpoint arrives in Module 5. Admin operations remain placeholders and return `501 Not Implemented`. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
+Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) have service implementations. Admin operations remain placeholders and return `501 Not Implemented`. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
 ## Production start
 
@@ -262,7 +425,15 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `MPESA_SHORTCODE` / `MPESA_PASSKEY` | Daraja sandbox STK credentials. |
 | `MPESA_CALLBACK_BASE_URL` / `MPESA_CALLBACK_TOKEN` | Public callback base URL and secret path token. |
 | `MPESA_STK_TARGET` | `registered` or `test_msisdn` for sandbox prompts. |
-| `MPESA_TEST_MSISDN` | Sandbox test phone used by `test_msisdn` mode. |
+| `MPESA_TEST_MSISDN` | Sandbox test phone used by `test_msisdn` mode (format `254[17]XXXXXXXX`). |
+| `MPESA_MAX_ATTEMPTS_PER_ORDER` | Payment attempts allowed per order (default 3). |
+| `MPESA_MIN_SECONDS_BEFORE_EXPIRY` | Seconds that must remain before order expiry to start a payment (default 90). |
+| `MPESA_STALE_INITIATING_SECONDS` | Age after which an unsent `initiating` payment is failed (default 60). |
+| `MPESA_PHONE_ATTEMPTS_PER_HOUR` | STK prompts allowed per phone per hour (default 5). |
+| `MPESA_QUERY_MIN_INTERVAL_SECONDS` | Minimum gap between STK status queries for one payment (default 20). |
+| `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES` | How long a timed-out payment is still queried for a late success (default 15). |
+| `MPESA_TRANSACTION_DESC` | STK `TransactionDesc`, at most 13 characters (default `Crop order`). |
+| `CALLBACK_MAX_BYTES` | Largest accepted callback body (default 16384). |
 | `ORDER_EXPIRY_MINUTES` | Pending order lifetime and stock reservation, 2 to 30 minutes (default 5). |
 | `RECONCILE_AFTER_SECONDS` | Age after which order reads query Daraja. |
 | `MAX_IMAGE_BYTES` | Maximum listing image upload size. |
@@ -279,3 +450,5 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 ## Payments and credentials
 
 Payments are sandbox-only. Configuration rejects any non-sandbox Daraja environment or URL; no real money is transferred. Never commit `.env`, passwords, access tokens, API keys, passkeys, database URLs, or service-role credentials.
+
+The app starts without payment settings; the pay endpoint then returns 503 `payments_unavailable`. See [8. M-Pesa Daraja sandbox and ngrok setup](#8-m-pesa-daraja-sandbox-and-ngrok-setup) to enable payments, and `docs/payments.md` for the payment design.

@@ -107,6 +107,7 @@ def view_row(**overrides):
         "payment_status": None,
         "mpesa_receipt_number": None,
         "result_desc": None,
+        "payment_stk_phone_number": None,
         "payment_completed_at": None,
         "payment_attempts": 0,
         "has_open_payment": False,
@@ -249,9 +250,9 @@ async def test_admin_reads_any_order_without_pay_or_cancel_actions(api_client, a
     assert body["can_cancel"] is False
 
 
-def test_pay_endpoint_is_not_registered_in_this_module(application):
+def test_order_routes_are_registered_with_the_pay_endpoint(application):
     paths = application.openapi()["paths"]
-    assert "/api/v1/orders/{order_id}/pay" not in paths
+    assert paths["/api/v1/orders/{order_id}/pay"].keys() == {"post"}
     assert paths["/api/v1/orders"].keys() == {"post"}
     assert paths["/api/v1/orders/{order_id}/cancel"].keys() == {"post"}
 
@@ -661,6 +662,21 @@ def test_expiry_and_action_flags(status, expires_delta, open_payment, expected):
     assert (out.is_expired, out.can_pay, out.can_cancel) == expected
 
 
+@pytest.mark.parametrize(
+    ("seconds_left", "attempts", "can_pay"),
+    [
+        (90, 0, True),
+        (89, 0, False),
+        (300, 2, True),
+        (300, 3, False),
+    ],
+)
+def test_can_pay_needs_time_before_expiry_and_attempts_left(seconds_left, attempts, can_pay):
+    out = order_out(expires_at=FIXED_NOW + timedelta(seconds=seconds_left), payment_attempts=attempts)
+    assert out.can_pay is can_pay
+    assert out.can_cancel is True
+
+
 def test_non_owner_viewer_gets_no_actions():
     row = view_row()
     out = order_service._order_out(row, make_user(UserRole.BUYER))
@@ -674,12 +690,15 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
         payment_status="completed",
         mpesa_receipt_number="SBX123",
         result_desc="The service request is processed successfully.",
+        payment_stk_phone_number="254708374149",
         payment_completed_at=FIXED_NOW,
         payment_attempts=2,
     )
     payload = json.loads(out.model_dump_json())
     assert payload["payment"] == {
         "status": "completed",
+        "status_message": "Payment received",
+        "stk_target_masked": "254*******149",
         "mpesa_receipt_number": "SBX123",
         "result_desc": "The service request is processed successfully.",
         "completed_at": "2026-10-13T09:00:00Z",
@@ -687,13 +706,15 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
     }
     assert set(OrderPaymentSummary.model_fields) == {
         "status",
+        "status_message",
+        "stk_target_masked",
         "mpesa_receipt_number",
         "result_desc",
         "completed_at",
         "attempts",
     }
     text = json.dumps(payload)
-    for forbidden in ("idempotency_key", "checkout_request_id", "merchant_request_id", "phone"):
+    for forbidden in ("idempotency_key", "checkout_request_id", "merchant_request_id", "phone", "254708374149"):
         assert forbidden not in text
     assert payload["note"] == ORDER_NOTE
     assert payload["unit_price"] == 112.56
@@ -710,25 +731,30 @@ async def test_owner_sees_order_and_reconcile_is_called_once(monkeypatch):
     order = make_order(buyer.id)
     calls = []
 
-    async def reconcile(session, seen_order):
-        calls.append(seen_order)
+    async def reconcile(session_factory, seen_order, viewer, client):
+        del session_factory
+        calls.append((seen_order, viewer, client))
 
     monkeypatch.setattr(payment_service, "maybe_reconcile_payment", reconcile)
     session = FakeSession(
         scalars=[order], results=[FakeResult(mapping_rows=[view_row(id=order.id, buyer_id=buyer.id)])]
     )
-    out = await order_service.get_order(session, order.id, buyer)
+    out = await order_service.get_order(session, order.id, buyer, session_factory=object, daraja_client="client")
     assert out.id == order.id
     assert out.can_pay is True
-    assert calls == [order]
+    assert calls == [(order, buyer, "client")]
+    assert session.commits == 1, "the read transaction ends before reconciliation"
 
 
-async def test_maybe_reconcile_payment_does_nothing():
-    class Untouchable:
-        def __getattr__(self, name):
-            raise AssertionError(f"session.{name} must not be used")
+async def test_admin_order_view_does_not_reconcile(monkeypatch):
+    async def reconcile(*args):
+        raise AssertionError("admins never reconcile")
 
-    assert await payment_service.maybe_reconcile_payment(Untouchable(), make_order(uuid4())) is None
+    monkeypatch.setattr(payment_service, "maybe_reconcile_payment", reconcile)
+    order = make_order(uuid4())
+    session = FakeSession(scalars=[order], results=[FakeResult(mapping_rows=[view_row(id=order.id)])])
+    out = await order_service.get_order(session, order.id, make_user(UserRole.ADMIN), session_factory=object)
+    assert (out.can_pay, out.can_cancel) == (False, False)
 
 
 async def test_other_buyers_order_is_the_same_404_as_a_missing_one(api_client, application):
@@ -857,12 +883,10 @@ def test_order_and_listing_services_do_not_use_float_for_money():
 def test_changed_files_import_no_ml_or_daraja_code(name):
     source = (APP_DIR / name).read_text(encoding="utf-8")
     imports = [line.strip() for line in source.splitlines() if line.strip().startswith(("import ", "from "))]
+    # Since Module 5 the orders router injects the Daraja client for the pay endpoint.
+    banned_words = ["sklearn", "xgboost", "shap"]
+    if name != "routers/orders.py":
+        banned_words.append("daraja")
     for line in imports:
-        for banned in ("sklearn", "xgboost", "shap", "daraja"):
+        for banned in banned_words:
             assert banned not in line.lower(), f"{name}: {line}"
-
-
-def test_maybe_reconcile_payment_contains_no_daraja_call():
-    source = inspect.getsource(payment_service.maybe_reconcile_payment)
-    body = source.split('"""')[-1]
-    assert "Daraja" not in body and "stk_" not in body

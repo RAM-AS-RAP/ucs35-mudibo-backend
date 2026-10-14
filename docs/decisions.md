@@ -23,3 +23,17 @@
 - Buyers see the seller's name on listings and orders, but never the farmer's id, phone number, or email.
 - Only a `pending_payment` order without an open payment can be cancelled; cancelling returns stock and is idempotent. Module 5's pay endpoint must lock the order row `FOR UPDATE` before inserting a payment and check that it is `pending_payment` and not expired, rather than relying on the payment insert trigger.
 - Admins may read a single order (`GET /orders/{id}`) but cannot act on it; `can_pay` and `can_cancel` are always false for them.
+
+# Payment decisions
+
+- A payment row (`initiating`) is created before the Daraja call, and the checkout and merchant request ids are saved afterwards.
+- No database transaction is held open during an HTTP call to Daraja; STK Push is never retried automatically.
+- Callbacks always return 200 after a valid token and are recorded in the append-only `payment_events` log first; a callback that arrives before its checkout id is saved is kept as an orphan event and matched later.
+- The phone number in a callback is masked by Safaricom and is never used for any lookup.
+- An STK Push Query result has no receipt and no amount, so a payment completed by a query keeps a null receipt and skips the amount check.
+- A late payment on an expired or cancelled order makes the order `needs_reconciliation`, never `paid`, because its stock was already restored.
+- At least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (90) seconds must remain before expiry to start a payment.
+- Payment attempts are limited to `MPESA_MAX_ATTEMPTS_PER_ORDER` (3) per order and `MPESA_PHONE_ATTEMPTS_PER_HOUR` (5) per prompt phone per hour.
+- The uvicorn access log rewrites `/payments/callback/<token>` to `/payments/callback/***`, so the callback token is never logged.
+- The `payment_failed` order status stays unused; a failed payment leaves the order `pending_payment` until it expires.
+- Production payments are impossible by construction: settings and the Daraja client reject any non-sandbox environment, URL or shortcode, and there is no production option.

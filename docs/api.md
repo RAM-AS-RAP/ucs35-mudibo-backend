@@ -25,7 +25,8 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/orders/mine` | Buyer | Optional `status`, `limit`, `offset`. | Own orders, newest first, with listing and payment summaries. |
 | GET | `/orders/{id}` | Owning buyer, or admin (read only) | Order UUID. | `OrderOut`. |
 | POST | `/orders/{id}/cancel` | Owning buyer | Order UUID. | Cancelled `OrderOut`; stock is returned to the listing. |
-| POST | `/payments/callback/{token}` | Daraja callback | Daraja STK callback JSON. | Always accepts valid-token callbacks with ResultCode 0. |
+| POST | `/orders/{id}/pay` | Owning buyer | `Idempotency-Key` header, empty body. | 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent. |
+| POST | `/payments/callback/{token}` | Daraja only (no authentication) | Daraja STK callback JSON. | 404 with an empty body for a wrong token; otherwise always 200 `{"ResultCode": 0, "ResultDesc": "Accepted"}`. |
 | POST | `/admin/admins` | Super admin | Name, phone, email, temporary password. | Created non-super admin. |
 | GET | `/admin/users` | Admin | Optional role, limit, offset. | Paginated users. |
 | PATCH | `/admin/users/{id}/disable` | Admin | User UUID. | Disabled account. |
@@ -36,7 +37,7 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | GET | `/admin/stats` | Admin | None | User, listing, order, and sandbox payment aggregates. |
 | GET | `/admin/forecast-accuracy` | Admin | Optional market, crop, horizon. | Accuracy rows and pooled summary. |
 
-Admin services remain placeholders and return `501 not_implemented`. The order pay endpoint (`POST /orders/{id}/pay`) arrives in Module 5. Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
+Admin services remain placeholders and return `501 not_implemented`. Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
 
 Only markets with published price data are offered (currently Nairobi and Kisumu). Crop values are `maize` or `beans`; forecast horizons are `one_month` or `two_month`. Market/crop values are normalized for case and surrounding whitespace. Unsupported values return 422; no-data markets return 404 `market_not_available`. A forecast is shown only when its origin equals the series' latest price month and that month is no more than two calendar months old in `Africa/Nairobi`; otherwise it returns 404 `forecast_unavailable` with reason `no_forecast` or `stale`. Prices and forecasts are read from stored pipeline output; this API does not invent or compute them.
 
@@ -177,7 +178,7 @@ Listing responses use `ListingOut`: `id`, `farmer_id`, `crop`, `market`, `quanti
 
 Only buyers use these routes, except that an admin may read a single order. Buyers cannot see prices or forecasts. The client never sends a role, buyer id, price, total, or status; all are derived on the server.
 
-Stock is reserved at checkout: the ordered quantity is removed from the listing immediately and the order stays `pending_payment` for `ORDER_EXPIRY_MINUTES` (default 5), measured by the database clock. A scheduled database job expires unpaid orders and returns their stock. A buyer can hold at most `MAX_PENDING_ORDERS_PER_BUYER` (default 3) unexpired pending orders, and only one per listing. The pay endpoint arrives in Module 5.
+Stock is reserved at checkout: the ordered quantity is removed from the listing immediately and the order stays `pending_payment` for `ORDER_EXPIRY_MINUTES` (default 5), measured by the database clock. A scheduled database job expires unpaid orders and returns their stock. A buyer can hold at most `MAX_PENDING_ORDERS_PER_BUYER` (default 3) unexpired pending orders, and only one per listing. Payment uses `POST /orders/{id}/pay` (below).
 
 | Method and path | Roles | Success | Other status codes and error codes |
 | --- | --- | --- | --- |
@@ -187,6 +188,7 @@ Stock is reserved at checkout: the ordered quantity is removed from the listing 
 | `GET /orders/mine` | Buyer | 200 | 422 `validation_error` for an invalid status or pagination. |
 | `GET /orders/{id}` | Owning buyer, admin | 200 | 404 `order_not_found` (another buyer's order and an unknown id give identical bodies). |
 | `POST /orders/{id}/cancel` | Owning buyer | 200 (also for an already cancelled order) | 404 `order_not_found`; 409 `order_not_cancellable` (paid, expired, or any other non-pending status), `payment_in_progress`; 429 `rate_limited` (30 per hour per IP). |
+| `POST /orders/{id}/pay` | Owning buyer | 202 (also for a replay of the same key) | 404 `order_not_found`; 409 `order_not_payable`, `order_expiring` (`reason` `expired` or `too_close`), `payment_in_progress`, `max_attempts_reached`; 422 `idempotency_key_required`, `invalid_idempotency_key`, `body_not_allowed`; 429 `too_many_payment_attempts` or `rate_limited` (10 per minute per IP); 502 `payment_request_failed`; 503 `payments_unavailable`. |
 
 All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
 
@@ -268,8 +270,9 @@ Body (unknown fields are rejected with 422):
 
 - `server_time` is the database time; use it with `expires_at` for a countdown instead of the device clock.
 - `is_expired` is true for a `pending_payment` order whose `expires_at` has passed, even before the expiry job has run.
-- `payment` is null, or the latest payment: `status`, `mpesa_receipt_number`, `result_desc`, `completed_at`, and `attempts` (number of payment rows). Payment identifiers, idempotency keys, phone numbers, and callback data are never returned.
-- `can_pay` is true only for the owning buyer, when the order is `pending_payment`, not expired, and has no open (`initiating` or `initiated`) payment. `can_cancel` is true for the owning buyer when the order is `pending_payment` with no open payment. Both are false for an admin.
+- `payment` is null, or the latest payment: `status`, `status_message`, `stk_target_masked` (for example `254*******149`), `mpesa_receipt_number`, `result_desc`, `completed_at`, and `attempts` (number of payment rows). `status_message` is a fixed English text per status: `initiating` "Sending the payment request", `initiated` "Waiting for you to confirm on your phone", `completed` "Payment received", `cancelled` "You cancelled the payment request", `timeout` "The request timed out", `failed` "The payment failed". Payment identifiers, idempotency keys, checkout and merchant request ids, full phone numbers, and callback data are never returned.
+- `can_pay` is true only for the owning buyer, when the order is `pending_payment`, not expired, has at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds left on the database clock, has no open (`initiating` or `initiated`) payment, and has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) payment rows. `can_cancel` is true for the owning buyer when the order is `pending_payment` with no open payment. Both are false for an admin.
+- When the owning buyer reads `GET /orders/{id}`, the latest payment is reconciled first: a stale `initiating` payment is failed, and an `initiated` payment older than `RECONCILE_AFTER_SECONDS` (or a `timeout` payment younger than `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES`) is checked with an STK Push Query, at most once every `MPESA_QUERY_MIN_INTERVAL_SECONDS`. A reconciliation failure never fails the request. Admin reads never reconcile.
 
 ### `GET /orders/mine`
 
@@ -278,6 +281,61 @@ Query parameters: optional `status` (an order status), `limit` (1-100, default 2
 ### `POST /orders/{id}/cancel`
 
 Cancels the buyer's own `pending_payment` order and returns its quantity to the listing; a `sold_out` listing becomes `active` again (a removed listing gets its quantity back but stays removed). Cancelling an already cancelled order returns 200 with the current order.
+
+### `POST /orders/{id}/pay`
+
+Sends an M-Pesa STK Push prompt for the order through the Safaricom Daraja **sandbox** (shortcode 174379). No real money moves; a `paid` order is a simulated confirmation.
+
+Headers: `Authorization: Bearer <token>` and `Idempotency-Key` (required, 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_`, `-`). The body must be empty. The client never sends an amount, phone number or order data: the amount is the order total and the phone is the buyer's registered number (or the sandbox test number when `MPESA_STK_TARGET=test_msisdn`). Rate limit: 10 per minute per IP.
+
+The key is stored scoped to the buyer and order, so it cannot collide with or probe other buyers' keys. Repeating a request with the same key returns 202 with the current order and never sends a second prompt, even after the order has moved on. Use a new key for a new attempt.
+
+The payment can start only when the order is `pending_payment`, at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds remain before `expires_at`, no other payment is open, the order has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) attempts, and the prompt phone has fewer than `MPESA_PHONE_ATTEMPTS_PER_HOUR` (default 5) attempts in the last hour. An `initiating` payment whose request was never sent (older than `MPESA_STALE_INITIATING_SECONDS`, default 60) is failed and does not block a new attempt.
+
+Response 202 (`OrderOut` plus two fields):
+
+```json
+{
+	"id": "123e4567-e89b-12d3-a456-426614174009",
+	"reference": "K7QX2MPA",
+	"status": "pending_payment",
+	"can_pay": false,
+	"can_cancel": false,
+	"payment": {
+		"status": "initiated",
+		"status_message": "Waiting for you to confirm on your phone",
+		"stk_target_masked": "254*******149",
+		"mpesa_receipt_number": null,
+		"result_desc": null,
+		"completed_at": null,
+		"attempts": 1
+	},
+	"message": "Check your phone and enter your M-Pesa PIN.",
+	"prompt": "Prompt sent to 254*******149"
+}
+```
+
+(Other `OrderOut` fields are omitted above.) Then poll `GET /orders/{id}` until the payment is final.
+
+Errors:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 404 | `order_not_found` | Unknown order or another buyer's order (identical bodies). |
+| 409 | `order_not_payable` | The order is not `pending_payment`. |
+| 409 | `order_expiring` | Fewer than 90 seconds remain; `reason` is `expired` or `too_close`. |
+| 409 | `payment_in_progress` | Another payment for the order is `initiating` or `initiated`. |
+| 409 | `max_attempts_reached` | The order already has the maximum number of payment attempts. |
+| 422 | `idempotency_key_required` / `invalid_idempotency_key` | Missing or malformed `Idempotency-Key`. |
+| 422 | `body_not_allowed` | The request had a body. |
+| 429 | `too_many_payment_attempts` | Too many prompts to the same phone in the last hour. |
+| 429 | `rate_limited` | More than 10 requests per minute from one IP. |
+| 502 | `payment_request_failed` | Daraja rejected the request or did not answer in time ("Could not start the M-Pesa prompt. Please try again."). After a timeout the prompt may still have arrived, so a duplicate prompt is possible in the sandbox. |
+| 503 | `payments_unavailable` | Payment settings are missing or `MPESA_CALLBACK_BASE_URL` is not HTTPS. |
+
+### `POST /payments/callback/{token}`
+
+Called by Daraja only, never by the PWA. There is no bearer authentication: the secret `MPESA_CALLBACK_TOKEN` in the path is the check, and a wrong token returns 404 with an empty body. Bodies over `CALLBACK_MAX_BYTES` (default 16384) return 413. After a valid token the endpoint always returns 200 with `{"ResultCode": 0, "ResultDesc": "Accepted"}`, also for malformed, unknown, duplicate or mismatched callbacks, so Daraja never retries. Every callback is stored as a payment event first. The phone number in the callback is ignored. There is no rate limit on this route. The server access log shows the path as `/api/v1/payments/callback/***`.
 
 ## Authentication details
 

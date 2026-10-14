@@ -15,3 +15,16 @@ def normalize_phone(raw: str) -> str:
     if not _PHONE_PATTERN.fullmatch(value):
         raise ValueError("Enter a valid Kenyan mobile phone number")
     return value
+
+
+def is_valid_phone(value: object) -> bool:
+    """Report whether ``value`` is a normalized Kenyan mobile number (254XXXXXXXXX)."""
+    return isinstance(value, str) and _PHONE_PATTERN.fullmatch(value) is not None
+
+
+def mask_phone(value: object) -> str:
+    """Mask a phone number so only its last three digits remain, for example 254*******149."""
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) < 3:
+        return "***"
+    return f"254*******{digits[-3:]}"

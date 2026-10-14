@@ -1,6 +1,6 @@
 """Async SQLAlchemy engine and session dependency."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -38,6 +38,19 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     if _session_factory is None:
         _session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
     return _session_factory
+
+
+def get_session_factory() -> Callable[[], AsyncSession]:
+    """FastAPI dependency returning a factory for short, independent transactions (payment code).
+
+    The engine is only created when the factory is first called, so routes that never use it work
+    without a database. Tests substitute this dependency.
+    """
+
+    def factory() -> AsyncSession:
+        return get_sessionmaker()()
+
+    return factory
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
