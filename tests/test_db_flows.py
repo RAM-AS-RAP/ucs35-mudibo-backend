@@ -13,15 +13,15 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.security import create_access_token
-from app.db import get_db, get_engine
+from app.db import get_db, get_engine, get_session_factory
 from app.models.enums import CropType, ForecastHorizon, ListingStatus, OrderStatus, PaymentStatus, PriceSource, UserRole
 from app.models.forecast import Forecast
 from app.models.listing import ProduceListing
@@ -42,12 +42,22 @@ async def dispose_engine_after_test() -> AsyncIterator[None]:
     await get_engine().dispose()
 
 
+def session_factory_for(db_session: AsyncSession):
+    """Sessions on the test connection, so payment code's short transactions also roll back."""
+
+    def factory() -> AsyncSession:
+        return AsyncSession(bind=db_session.bind, expire_on_commit=False, join_transaction_mode="create_savepoint")
+
+    return factory
+
+
 @pytest.fixture
 def db_client(application, api_client: AsyncClient, db_session: AsyncSession) -> AsyncClient:
     async def dependency() -> AsyncIterator[AsyncSession]:
         yield db_session
 
     application.dependency_overrides[get_db] = dependency
+    application.dependency_overrides[get_session_factory] = lambda: session_factory_for(db_session)
     return api_client
 
 
@@ -259,18 +269,30 @@ async def test_order_detail_includes_latest_payment(db_client: AsyncClient, db_s
 async def test_second_payment_while_one_is_open_returns_409(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def no_daraja(*args: object, **kwargs: object) -> None:
-        raise AssertionError("a rejected payment attempt must not contact Daraja")
+    class NoDaraja:
+        async def stk_push(self, *args: object) -> None:
+            raise AssertionError("a rejected payment attempt must not contact Daraja")
 
-    monkeypatch.setattr(payment_service, "DarajaClient", no_daraja)
+    settings = get_settings().model_copy(
+        update={
+            "mpesa_consumer_key": "key",
+            "mpesa_consumer_secret": "secret",
+            "mpesa_passkey": "passkey",
+            "mpesa_callback_base_url": "https://payments.example.test",
+            "mpesa_callback_token": "t" * 32,
+        }
+    )
+    monkeypatch.setattr(payment_service, "get_settings", lambda: settings)
     buyer = await make_user(db_session, UserRole.BUYER)
     order = await make_order_with_open_payment(db_session, buyer)
 
-    with pytest.raises(HTTPException) as exc_info:
-        await payment_service.initiate_payment(db_session, order.id, buyer, f"key-{uuid4()}")
+    with pytest.raises(AppError) as exc_info:
+        await payment_service.initiate_payment(
+            db_session, session_factory_for(db_session), NoDaraja(), buyer, order.id, f"key-{uuid4().hex}"
+        )
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["code"] == "payment_in_progress"
+    assert exc_info.value.code == "payment_in_progress"
 
 
 @pytest.mark.parametrize(
