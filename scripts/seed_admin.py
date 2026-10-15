@@ -4,7 +4,7 @@ import asyncio
 from getpass import getpass
 
 from pydantic import EmailStr, TypeAdapter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
@@ -51,6 +51,7 @@ async def seed_admin() -> None:
         role=UserRole.ADMIN,
         is_super_admin=True,
         must_change_password=True,
+        password_changed_at=func.now(),
     )
     try:
         async with session_factory() as session:

@@ -175,6 +175,12 @@ Get `YOUR_PROJECT_REF` from the Supabase project URL or dashboard. `supabase log
 
 The admin routes need migration `20261015000100_admin_resolution_event.sql`, which allows the `admin_action` payment event type used to record order resolutions. A fresh `supabase db reset` (local) applies it with the others. For an existing hosted project, apply it with `supabase db push` as above (same command on every OS), then run `supabase/verification/admin_event_check.sql` in the Supabase SQL Editor. It works inside a rolled-back transaction and ends with one `PASS` row per check: `admin_action` accepted, unknown event types rejected, deletes still blocked, and callback matching still allowed. Without the migration, resolving an order fails with a database error.
 
+### Invites and password reset migration (Module 6 addendum)
+
+Admin invitations and email password resets need migration `20261016000100_admin_invites_and_password_resets.sql`. It adds `users.password_changed_at` and the `admin_invites` and `password_reset_codes` tables (row level security on, no access for `anon` or `authenticated`). `supabase db reset` (local) applies it with the others; for a hosted project run `supabase db push` as above, then run `supabase/verification/invites_check.sql` in the Supabase SQL Editor. It works inside a rolled-back transaction and ends with one `PASS` row per check.
+
+Then install the new dependency (`python -m pip install -r requirements.txt`, which adds `aiosmtplib`), set `INVITE_CODE_PEPPER` (generate it like `JWT_SECRET` below), and configure email as described in `docs/email.md`. In development the default `EMAIL_PROVIDER=console` writes emails to `./.dev_mailbox/`. Invite admins with `POST /api/v1/admin/invites`; see `docs/admin.md`.
+
 ## 5. Create the initial administrator (optional)
 
 After the database migrations have been applied, set `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, and `SEED_ADMIN_EMAIL` in `.env`. The phone must be a Kenyan mobile number. Either set `SEED_ADMIN_PASSWORD` to a password of at least 12 characters or leave it blank to be prompted twice without echoing it. Then run once per environment:
@@ -400,7 +406,7 @@ In Windows PowerShell, set `$env:ALLOW_CONCURRENCY_CHECK = "1"` first. **Warning
 
 ## Implemented scope
 
-Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) and the admin APIs (admins and users, listing moderation, order and payment review, reconciliation, statistics and forecast accuracy; see `docs/admin.md`) have service implementations. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
+Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) and the admin APIs (admin invitations by emailed code, users, listing moderation, order and payment review, reconciliation, statistics and forecast accuracy; see `docs/admin.md`) have service implementations. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
 ## Production start
 
@@ -440,7 +446,6 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES` | How long a timed-out payment is still queried for a late success (default 15). |
 | `MPESA_TRANSACTION_DESC` | STK `TransactionDesc`, at most 13 characters (default `Crop order`). |
 | `CALLBACK_MAX_BYTES` | Largest accepted callback body (default 16384). |
-| `ADMIN_TEMP_PASSWORD_BYTES` | Random bytes in server-generated temporary passwords, 12 to 32 (default 12). |
 | `RESOLVE_NOTE_MIN_LENGTH` | Minimum length of the note when resolving a reconciliation order (default 10). |
 | `ORDER_EXPIRY_MINUTES` | Pending order lifetime and stock reservation, 2 to 30 minutes (default 5). |
 | `RECONCILE_AFTER_SECONDS` | Age after which order reads query Daraja. |
@@ -454,6 +459,26 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `ORDER_REFERENCE_LENGTH` | Order reference length, 6 to 12 characters (default 8). |
 | `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, `SEED_ADMIN_EMAIL` | Initial super-admin profile. |
 | `SEED_ADMIN_PASSWORD` | Optional initial password, at least 12 characters; remove after seeding. |
+| `INVITE_CODE_PEPPER` | Secret (at least 32 characters) used to HMAC invite and reset codes. Without it the invite and reset routes return 503 `codes_unavailable`; the rest of the API works. |
+| `INVITE_TTL_DAYS` | Days an admin invite stays open, 1 to 30 (default 7). |
+| `INVITE_CODE_TTL_MINUTES` | Minutes an emailed invite code works, 5 to 60 (default 15). |
+| `INVITE_MAX_ATTEMPTS` | Wrong codes in total before an invite locks, 1 to 20 (default 10). |
+| `INVITE_MAX_SENDS` | Codes sent per invite, 1 to 5 (default 5). |
+| `INVITE_RESEND_COOLDOWN_SECONDS` | Minimum gap between code emails for one invite or account, 10 to 3600 (default 60). |
+| `INVITE_MAX_PENDING` | Pending invites allowed at once, 1 to 100 (default 10). |
+| `RESET_CODE_TTL_MINUTES` | Minutes a password reset code works, 5 to 60 (default 15). |
+| `RESET_MAX_ATTEMPTS` | Wrong codes before a reset code locks, 1 to 20 (default 5). |
+| `RESET_MAX_REQUESTS_PER_HOUR` | Reset codes issued per account per hour, 1 to 20 (default 3). |
+| `EMAIL_PROVIDER` | `console` (development only, refused in production), `smtp`, `resend` or `brevo`. See `docs/email.md`. |
+| `EMAIL_API_KEY` | Resend or Brevo API key; required for those providers. |
+| `EMAIL_FROM_NAME` | Sender display name (default `Admin via AgriSence`). |
+| `EMAIL_FROM_ADDRESS` | Sender address; required for `smtp`, `resend` and `brevo`. |
+| `EMAIL_REPLY_TO` | Optional reply address. |
+| `FRONTEND_BASE_URL` | Web app base URL used in emails (`/accept-invite`, `/reset-password`); must start with `https://` in production. |
+| `SMTP_HOST`, `SMTP_PORT` | SMTP server (default `smtp.gmail.com`, `587`). |
+| `SMTP_SECURITY` | `starttls` (port 587, default) or `ssl` (port 465). Certificate verification is always on. |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | SMTP login; for Gmail the account address and an app password, never the normal password. |
+| `SMTP_TIMEOUT_SECONDS` | SMTP connection and command timeout, 1 to 120 (default 15). |
 
 ## Payments and credentials
 

@@ -8,8 +8,12 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | POST | `/auth/register/farmer` | Public | Name, phone, optional email, password. | Created farmer account. |
 | POST | `/auth/register/buyer` | Public | Name, phone, optional email, password. | Created buyer account. |
 | POST | `/auth/login` | Public | Phone/email identifier and password. | Bearer token, role, forced-password-change flag. |
-| POST | `/auth/change-password` | Any authenticated user | Current and new password. | Updated account. |
+| POST | `/auth/change-password` | Any authenticated user | Current and new password. | 200 with a note that the user must log in again; earlier tokens are revoked. |
 | GET | `/auth/me` | Any authenticated user | None | Current account. |
+| POST | `/auth/accept-invite` | Public | JSON `email`, `code`, `password`. | 201 `UserOut` of the new admin. |
+| POST | `/auth/invite/request-code` | Public | JSON `email`. | Always 202 with the same body. |
+| POST | `/auth/password-reset/request` | Public | JSON `email`. | Always 202 with the same body. |
+| POST | `/auth/password-reset/confirm` | Public | JSON `email`, `code`, `new_password`. | 204. |
 | GET | `/markets` | Farmer, admin | None | Markets with price data, with each market's latest observed month. |
 | GET | `/prices/current` | Farmer, admin | `crop=maize` or `crop=beans`. | `{items, as_of_note}`; each item has current price/source/fetched time and the immediately previous calendar-month price/change, null when missing. Empty items if that crop has no data. |
 | GET | `/prices/trends` | Farmer, admin | Available `market`, `crop`, `months` (1-60, default 24). | Last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market. |
@@ -27,11 +31,14 @@ All paths are prefixed with `/api/v1`. Authenticated routes require a bearer acc
 | POST | `/orders/{id}/cancel` | Owning buyer | Order UUID. | Cancelled `OrderOut`; stock is returned to the listing. |
 | POST | `/orders/{id}/pay` | Owning buyer | `Idempotency-Key` header, empty body. | 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent. |
 | POST | `/payments/callback/{token}` | Daraja only (no authentication) | Daraja STK callback JSON. | 404 with an empty body for a wrong token; otherwise always 200 `{"ResultCode": 0, "ResultDesc": "Accepted"}`. |
-| POST | `/admin/admins` | Super admin | JSON `name`, `phone_number`, `email`. | 201 `UserAdminOut` plus a one-time `temporary_password`. |
+| POST | `/admin/invites` | Super admin | JSON `name`, `phone_number`, `email`. | 201 invite summary; the code is emailed, never returned. |
+| POST | `/admin/invites/{id}/resend` | Super admin | Empty body. | Invite summary; a new code is emailed. |
+| GET | `/admin/invites` | Super admin | Optional `status`, `limit`, `offset`. | Paginated invites. |
+| DELETE | `/admin/invites/{id}` | Super admin | Invite UUID. | 204; revokes a pending invite. |
+| POST | `/admin/email/test` | Super admin | Empty body. | `{"email_sent": true}` or 502 `email_failed` with a `category`. |
 | GET | `/admin/users` | Admin | Optional `role`, `is_disabled`, `q`, `limit`, `offset`. | Paginated `UserAdminOut`, newest first. |
 | PATCH | `/admin/users/{id}/disable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
 | PATCH | `/admin/users/{id}/enable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
-| POST | `/admin/users/{id}/reset-password` | Admin (super admin for admin targets) | Empty body. | One-time `temporary_password`. |
 | GET | `/admin/listings` | Admin | Optional `status`, `crop`, `market`, `farmer_id`, `q`, `limit`, `offset`. | Paginated `AdminListingOut`. |
 | DELETE | `/admin/listings/{id}` | Admin | Listing UUID. | 204; soft removal that cancels unpaid orders. |
 | GET | `/admin/orders` | Admin | Optional `status`, `q`, `limit`, `offset`. | Paginated `AdminOrderOut`. |
@@ -344,20 +351,23 @@ Called by Daraja only, never by the PWA. There is no bearer authentication: the 
 
 ## Admin API
 
-All routes are under `/api/v1/admin` and require an admin account; the role is read from the database on every request. Every route returns 401 without a valid token, 403 `forbidden` for farmers and buyers, and 403 `password_change_required` until a temporary password has been changed. Pagination uses `limit` (1-100, default 20) and `offset`, and returns `{items, total, limit, offset}`. Search `q` is 2 to 50 characters; `%` and `_` match literally.
+All routes are under `/api/v1/admin` and require an admin account; the role is read from the database on every request. Every route returns 401 without a valid token, 403 `forbidden` for farmers and buyers, and 403 `password_change_required` until the account's password has been changed (the seeded super admin's first login). Pagination uses `limit` (1-100, default 20) and `offset`, and returns `{items, total, limit, offset}`. Search `q` is 2 to 50 characters; `%` and `_` match literally.
 
-Rate limits per IP: `POST /admin/admins` and `POST /admin/users/{id}/reset-password` 10 per hour; disable, enable, listing removal and order resolution 30 per hour (429 `rate_limited`).
+Rate limits per IP: the four invite routes 10 per hour each; `POST /admin/email/test` 5 per hour; disable, enable, listing removal and order resolution 30 per hour (429 `rate_limited`).
 
-Admin responses never contain password hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes.
+No route ever returns a credential. New admins are invited by an emailed code and choose their own password; anyone who forgets a password resets it by email (see [Invites and password reset](#invites-and-password-reset)). Admin responses never contain password hashes, codes or code hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes; invite routes show masked emails (`g***@e***.com`) and phone numbers.
 
 ### Status and error codes
 
 | Route | Success | Errors |
 | --- | --- | --- |
-| `POST /admin/admins` | 201 | 403 `forbidden` (not the super admin); 409 `conflict` (duplicate phone or email, one generic message); 422 `validation_error` |
+| `POST /admin/invites` | 201 | 403 `forbidden` (not the super admin); 409 `user_exists`, `too_many_pending_invites`, `invite_conflict`; 422 `validation_error`; 503 `codes_unavailable` |
+| `POST /admin/invites/{id}/resend` | 200 | 403 `forbidden`; 404 `invite_not_found`; 409 `invite_not_pending`, `send_limit_reached`; 429 `resend_cooldown`; 422 `body_not_allowed`; 503 `codes_unavailable` |
+| `GET /admin/invites` | 200 | 403 `forbidden`; 422 `validation_error` |
+| `DELETE /admin/invites/{id}` | 204 (also when already revoked) | 403 `forbidden`; 404 `invite_not_found`; 409 `invite_not_pending` (already used) |
+| `POST /admin/email/test` | 200 | 403 `forbidden`; 409 `no_email`; 422 `body_not_allowed`; 502 `email_failed` with `category` |
 | `GET /admin/users` | 200 | 422 `validation_error` |
 | `PATCH /admin/users/{id}/disable`, `/enable` | 200 | 403 `cannot_modify_super_admin`, `cannot_disable_self`, `forbidden` (ordinary admin on an admin); 404 `user_not_found`; 422 `body_not_allowed` |
-| `POST /admin/users/{id}/reset-password` | 200 | 403 `cannot_modify_super_admin`, `forbidden`; 404 `user_not_found`; 422 `body_not_allowed` |
 | `GET /admin/listings` | 200 | 422 `validation_error` |
 | `DELETE /admin/listings/{id}` | 204 (also when already removed) | 404 `listing_not_found`; 409 `listing_has_open_payments` |
 | `GET /admin/orders`, `GET /admin/orders/{id}` | 200 | 404 `order_not_found` |
@@ -366,15 +376,55 @@ Admin responses never contain password hashes, idempotency keys, merchant reques
 | `GET /admin/payments/{id}/events` | 200 | 404 `payment_not_found` |
 | `GET /admin/stats`, `GET /admin/forecast-accuracy` | 200 | 422 `validation_error` |
 
-### Users
+### Invites (super admin only)
 
-`POST /admin/admins` (super admin only). Body, unknown fields rejected:
+`POST /admin/invites`. Body, unknown fields rejected (so no `role`, `is_super_admin` or other flag can be sent):
 
 ```json
 {"name": "Grace Admin", "phone_number": "0712000001", "email": "grace@example.com"}
 ```
 
-The server sets `role=admin`, `is_super_admin=false`, `must_change_password=true` and `created_by`, and generates the temporary password (`ADMIN_TEMP_PASSWORD_BYTES`, default 12 random bytes). The response has `Cache-Control: no-store`; the password is shown only here and is never stored or logged in plain text:
+The phone number is normalised and the email lowercased. In one transaction the server:
+
+1. Refuses with 409 `user_exists` when an account already has this phone number or email.
+2. Revokes any earlier pending invite for the same email or phone, so the newest invite replaces it.
+3. Refuses with 409 `too_many_pending_invites` when `INVITE_MAX_PENDING` (10) invites are pending.
+4. Stores the invite with an HMAC of a new 8-character code, `expires_at = now() + INVITE_TTL_DAYS` (7 days) and `code_expires_at = now() + INVITE_CODE_TTL_MINUTES` (15 minutes), using the database clock.
+
+After the commit the code is emailed to the invited address. The response (`Cache-Control: no-store`) never contains the code:
+
+```json
+{
+	"id": "6f1c0e8a-2b44-4c55-9a1e-6c2f8d0b7e11",
+	"name": "Grace Admin",
+	"email_masked": "g***@e***.com",
+	"phone_masked": "254*******001",
+	"expires_at": "2026-10-22T09:00:00Z",
+	"code_expires_at": "2026-10-15T09:15:00Z",
+	"email_sent": true,
+	"message": "Invitation sent. The code in the email is valid for 15 minutes."
+}
+```
+
+If the email cannot be sent, the invite is kept, `email_sent` is `false`, and the message says to use the resend route.
+
+`POST /admin/invites/{id}/resend` (empty body) emails a new code for a pending invite; the previous code stops working. It returns 409 `invite_not_pending` when the invite is used, revoked, locked or expired, 429 `resend_cooldown` within `INVITE_RESEND_COOLDOWN_SECONDS` (60) of the last send, and 409 `send_limit_reached` after `INVITE_MAX_SENDS` (5) sends. Resending never resets the attempt counter.
+
+`GET /admin/invites` filters by `status` (`pending`, `used`, `expired`, `revoked`, `locked`). Items: `id, name, email_masked, status, created_by_name, created_at, expires_at, send_count, attempts, used_at, revoked_at`.
+
+`DELETE /admin/invites/{id}` revokes a pending (also an expired or locked) invite and returns 204; repeating it returns 204; a used invite gives 409 `invite_not_pending`.
+
+`POST /admin/email/test` (empty body) sends a short message without any code or secret to the acting super admin's own email address and returns `{"email_sent": true}`. On failure it returns 502 with only a category, never the provider's text:
+
+```json
+{"error": {"code": "email_failed", "message": "The email could not be sent.", "category": "auth_failed"}}
+```
+
+Categories: `connection_timeout`, `auth_failed`, `tls_failed`, `recipient_refused`, `invalid_header`, `not_configured`, `other`. When `INVITE_CODE_PEPPER` is not set, the invite create and resend routes and the public code routes return 503 `codes_unavailable`; the rest of the API is unaffected.
+
+### Users
+
+`GET /admin/users` filters by `role`, `is_disabled` and `q` (case-insensitive name or email, or a phone-number prefix such as `0712`). Items are `UserAdminOut`:
 
 ```json
 {
@@ -387,20 +437,19 @@ The server sets `role=admin`, `is_super_admin=false`, `must_change_password=true
 	"is_disabled": false,
 	"disabled_at": null,
 	"disabled_by_name": null,
-	"must_change_password": true,
+	"must_change_password": false,
 	"created_at": "2026-10-15T09:00:00Z",
 	"created_by_name": "Super Admin",
 	"listing_count": null,
-	"order_count": null,
-	"temporary_password": "q3J8vX0bTzR1mN5w"
+	"order_count": null
 }
 ```
 
-`GET /admin/users` filters by `role`, `is_disabled` and `q` (case-insensitive name or email, or a phone-number prefix such as `0712`). Items are `UserAdminOut` as above without `temporary_password`; `listing_count` is set for farmers and `order_count` for buyers, otherwise null.
+`listing_count` is set for farmers and `order_count` for buyers, otherwise null.
 
 `PATCH /admin/users/{id}/disable` sets `is_disabled`, `disabled_at` and `disabled_by`; `enable` clears all three. Neither applies to the super admin or to yourself, and only the super admin can disable or enable another admin. Repeating a call returns 200 unchanged. A disabled user's next request returns 401.
 
-`POST /admin/users/{id}/reset-password` returns `{"temporary_password": "..."}` once (with `Cache-Control: no-store`) and forces a password change. The super admin's password cannot be reset here, and only the super admin can reset another admin. Existing access tokens stay valid until they expire (`ACCESS_TOKEN_EXPIRE_MINUTES`, 60 by default), because tokens carry no password version.
+There is no admin password reset route. A user who forgets a password uses the email reset below; to lock someone out immediately, disable the account.
 
 ### Listings
 
@@ -497,6 +546,12 @@ Every status appears, with 0 when there are none. `completed_sandbox_amount_kes`
 
 Registration passwords and `new_password` on `/auth/change-password` must be 8-128 characters and include at least one uppercase letter, one lowercase letter, one digit, and one non-whitespace symbol. Login accepts existing passwords without reapplying the creation policy.
 
+New passwords chosen through change-password, invite acceptance and password reset also pass the password policy (`app/core/password_policy.py`): admins need at least 12 characters, farmers and buyers at least 8, everyone at most 128; the password may not equal the account's email, the part of the email before `@`, the name or the phone number (ignoring case), and may not be one of the common passwords in `app/core/common_passwords.txt`. A failure returns 422 with a short reason that never repeats the password:
+
+```json
+{"error": {"code": "password_too_weak", "message": "The password is too weak.", "reason": "Use at least 12 characters."}}
+```
+
 ```json
 {
 	"name": "Amina Farmer",
@@ -520,7 +575,15 @@ Successful registration returns `201` and a user projection containing `id`, `na
 }
 ```
 
-`POST /auth/change-password` accepts `current_password` and `new_password`, returns `204`, and rejects a new password equal to the current password. `GET /auth/me` returns the current user projection.
+`POST /auth/change-password` accepts `current_password` and `new_password`, rejects a new password equal to the current password, and returns `200`:
+
+```json
+{"message": "Password changed. Log in again: your current access token is no longer accepted.", "login_required": true}
+```
+
+`GET /auth/me` returns the current user projection.
+
+Access tokens carry their issue time (`iat`, whole seconds). Every password change (change-password, invite acceptance, password reset, and the seed script) sets `users.password_changed_at` from the database clock, and a token whose `iat` is earlier than the whole second of `password_changed_at` gets the same 401 as any invalid token. A token issued in the same second as the change stays valid.
 
 For example, a password missing an uppercase letter and symbol returns `422` with safe field-specific details:
 
@@ -540,4 +603,25 @@ For example, a password missing an uppercase letter and symbol returns `422` wit
 }
 ```
 
-The response describes failed rules but never includes the submitted password. Authentication error codes: `invalid_credentials` (`401`) is identical for unknown, incorrect-password, and disabled accounts; `password_change_required` (`403`) blocks other authenticated routes until the temporary password changes; `forbidden` (`403`) indicates a role or super-admin failure; `rate_limited` (`429`) covers IP and per-identifier throttles; `conflict` (`409`) is the generic duplicate-account response; `validation_error` (`422`) lists field names and safe validation details.
+The response describes failed rules but never includes the submitted password. Authentication error codes: `invalid_credentials` (`401`) is identical for unknown, incorrect-password, and disabled accounts; `password_change_required` (`403`) blocks other authenticated routes until a forced password change is done (the seeded super admin's first login); `forbidden` (`403`) indicates a role or super-admin failure; `rate_limited` (`429`) covers IP and per-identifier throttles; `conflict` (`409`) is the generic duplicate-account response; `validation_error` (`422`) lists field names and safe validation details.
+### Invites and password reset
+
+These public routes need no token. Codes are 8 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`, shown in emails as `XXXX-XXXX`; spaces, hyphens and lower case are accepted. A code is never put in a URL, a subject line, a response or a log. When `INVITE_CODE_PEPPER` is not set, all four return 503 `codes_unavailable`.
+
+`POST /auth/accept-invite` (5 per minute per IP). Body, unknown fields rejected:
+
+```json
+{"email": "grace@example.com", "code": "K7QX-2MPA", "password": "A-long-private-passw0rd"}
+```
+
+The password policy is checked first (admin rules) and a failure returns 422 `password_too_weak` that reveals nothing about any invite. The attempt is then counted in its own committed transaction, so a failed guess always counts; after `INVITE_MAX_ATTEMPTS` (10) wrong codes in total, across all resends, the invite is locked and even the correct code is refused. A correct code claims the invite and creates the admin in one transaction: `role=admin`, `is_super_admin=false`, `must_change_password=false`, `created_by` = the inviting super admin. The response is 201 with the user projection, and the new admin logs in normally. An unknown email, a wrong code, an expired code or invite, a used, revoked or locked invite and a duplicate phone or email all return the same response:
+
+```json
+{"error": {"code": "invalid_or_expired_code", "message": "The code is invalid or has expired."}}
+```
+
+`POST /auth/invite/request-code` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an invitation exists for this address, a new code has been sent."}`. When a pending, unlocked, unexpired invite exists and the cooldown and send cap allow it, a new code replaces the old one (attempts are not reset) and the email is sent in a background task after the response.
+
+`POST /auth/password-reset/request` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an account with this email exists, a reset code has been sent."}`. For an enabled account with that email, at most `RESET_MAX_REQUESTS_PER_HOUR` (3) codes are issued per hour and not within `INVITE_RESEND_COOLDOWN_SECONDS` of the previous one; a new code supersedes the active one and is emailed in a background task. Farmers and buyers who registered without an email cannot use this flow.
+
+`POST /auth/password-reset/confirm` (5 per minute per IP) with `{"email", "code", "new_password"}` returns 204. It uses the same two steps as accepting an invite (the attempt is committed first; the code locks after `RESET_MAX_ATTEMPTS` (5) wrong tries; the code is single use and expires after `RESET_CODE_TTL_MINUTES` (15)). On success the password is replaced, `must_change_password` is cleared and `password_changed_at` is set, so older tokens stop working. Every failure, including an unknown email and a disabled account, returns the same 400 `invalid_or_expired_code`. The password policy follows the account's role.

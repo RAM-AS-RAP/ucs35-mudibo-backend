@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.errors import ConflictError, InvalidCredentials, TooManyAttempts
+from app.core.password_policy import validate_new_password
 from app.core.security import DUMMY_HASH, create_access_token, hash_password, needs_rehash, verify_password
 from app.models.enums import UserRole
 from app.models.user import User
@@ -162,12 +163,18 @@ async def login(session: AsyncSession, identifier: str, password: str) -> dict[s
 
 
 async def change_password(session: AsyncSession, user: User, current_password: str, new_password: str) -> None:
-    """Verify and replace the current password, clearing forced-change state."""
+    """Verify and replace the current password, clearing forced-change state.
+
+    ``password_changed_at`` (database clock) revokes every access token issued before the change,
+    including the one used for this request, so the user must log in again.
+    """
     if not verify_password(user.password_hash, current_password):
         raise HTTPException(
             status_code=400,
             detail={"code": "wrong_current_password", "message": "Current password is incorrect"},
         )
+    validate_new_password(new_password, user.role, email=user.email, name=user.name, phone=user.phone_number)
     user.password_hash = hash_password(new_password)
     user.must_change_password = False
+    user.password_changed_at = func.now()
     await session.commit()

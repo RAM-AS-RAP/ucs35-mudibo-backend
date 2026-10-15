@@ -7,11 +7,10 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Query
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from app.core.config import get_settings
 from app.schemas.common import DecimalOutput, Page
-from app.utils.phone import normalize_phone
 
 SEARCH_MIN_LENGTH = 2
 SEARCH_MAX_LENGTH = 50
@@ -21,34 +20,6 @@ SearchQuery = Annotated[str | None, Query(min_length=SEARCH_MIN_LENGTH, max_leng
 
 
 # Users ---------------------------------------------------------------------------------------
-
-
-class CreateAdminRequest(BaseModel):
-    """New ordinary administrator; the server sets the role, flags, creator and temporary password."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=2, max_length=100)
-    phone_number: str
-    email: EmailStr
-
-    @field_validator("name")
-    @classmethod
-    def strip_name(cls, value: str) -> str:
-        stripped = value.strip()
-        if len(stripped) < 2:
-            raise ValueError("Name must contain at least 2 characters")
-        return stripped
-
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone(cls, value: str) -> str:
-        return normalize_phone(value)
-
-    @field_validator("email")
-    @classmethod
-    def lower_email(cls, value: str) -> str:
-        return str(value).lower()
 
 
 class UserAdminOut(BaseModel):
@@ -70,16 +41,6 @@ class UserAdminOut(BaseModel):
 
 class UserAdminPage(Page[UserAdminOut]):
     pass
-
-
-class CreateAdminResponse(UserAdminOut):
-    """Shown once; the temporary password is never stored or logged in plain text."""
-
-    temporary_password: str
-
-
-class ResetPasswordResponse(BaseModel):
-    temporary_password: str
 
 
 # Listings ------------------------------------------------------------------------------------

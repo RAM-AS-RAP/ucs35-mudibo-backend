@@ -433,3 +433,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Development email output (EMAIL_PROVIDER=console); contains codes
+.dev_mailbox/

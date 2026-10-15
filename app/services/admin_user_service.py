@@ -1,30 +1,28 @@
-"""Administrator user management: create admins, list, disable/enable, and reset passwords.
+"""Administrator user management: list users, disable and enable accounts.
 
+Admins are created through email invites (``invite_service``) and passwords are reset by the user
+through the email reset flow (``password_reset_service``); no function here produces a credential.
 User rows are locked alone (``SELECT ... FOR UPDATE`` on the target). Logs carry only the event name,
-the acting admin id and the target id: never passwords, temporary passwords, hashes or tokens.
+the acting admin id and the target id: never passwords, codes, hashes or tokens.
 """
 
 from __future__ import annotations
 
 import logging
-import secrets
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import status
 from sqlalchemy import Select, func, or_, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.core.config import get_settings
-from app.core.errors import AppError, ConflictError
-from app.core.security import hash_password
+from app.core.errors import AppError
 from app.models.enums import UserRole
 from app.models.listing import ProduceListing
 from app.models.order import Order
 from app.models.user import User
-from app.schemas.admin import CreateAdminRequest, CreateAdminResponse, UserAdminOut, UserAdminPage
+from app.schemas.admin import UserAdminOut, UserAdminPage
 from app.schemas.common import Pagination
 from app.utils.search import LIKE_ESCAPE, contains_pattern, phone_prefix
 
@@ -37,11 +35,6 @@ def _role(user: Any) -> str:
 
 def _is_super_admin(user: Any) -> bool:
     return bool(getattr(user, "is_super_admin", False))
-
-
-def generate_temporary_password() -> str:
-    """A server-generated temporary password; it is returned once and only its hash is stored."""
-    return secrets.token_urlsafe(get_settings().admin_temp_password_bytes)
 
 
 def _users_query() -> Select[Any]:
@@ -138,36 +131,6 @@ async def list_users(
     )
 
 
-async def create_admin(session: AsyncSession, actor: User, body: CreateAdminRequest) -> CreateAdminResponse:
-    """Create an ordinary admin with a server-generated temporary password that must be changed."""
-    temporary_password = generate_temporary_password()
-    admin = User(
-        id=uuid4(),
-        name=body.name,
-        phone_number=body.phone_number,
-        email=body.email,
-        password_hash=hash_password(temporary_password),
-        role=UserRole.ADMIN,
-        is_super_admin=False,
-        must_change_password=True,
-        created_by=actor.id,
-    )
-    session.add(admin)
-    try:
-        await session.commit()
-    except IntegrityError as exc:
-        await session.rollback()
-        original = getattr(exc, "orig", None)
-        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
-        if sqlstate == "23505" or "unique" in str(original).lower():
-            # The same generic conflict as registration, so phone and email cannot be told apart.
-            raise ConflictError() from None
-        raise
-    logger.info("admin_created actor=%s target=%s", actor.id, admin.id)
-    out = await get_user_out(session, admin.id)
-    return CreateAdminResponse(**out.model_dump(), temporary_password=temporary_password)
-
-
 async def _lock_target(session: AsyncSession, user_id: UUID) -> User:
     target = await session.scalar(
         select(User).where(User.id == user_id).with_for_update().execution_options(populate_existing=True)
@@ -203,22 +166,3 @@ async def set_user_disabled(session: AsyncSession, actor: User, user_id: UUID, d
     else:
         await session.commit()  # release the row lock
     return await get_user_out(session, user_id)
-
-
-async def reset_password(session: AsyncSession, actor: User, user_id: UUID) -> str:
-    """Replace the password with a temporary one and force a change at next login.
-
-    Existing access tokens stay valid until they expire, because tokens carry no password version.
-    """
-    target = await _lock_target(session, user_id)
-    if target.is_super_admin:
-        raise AppError(
-            status.HTTP_403_FORBIDDEN, "cannot_modify_super_admin", "The super administrator cannot be modified."
-        )
-    _forbid_admin_target_for_ordinary_admin(actor, target)
-    temporary_password = generate_temporary_password()
-    target.password_hash = hash_password(temporary_password)
-    target.must_change_password = True
-    await session.commit()
-    logger.info("password_reset actor=%s target=%s", actor.id, target.id)
-    return temporary_password

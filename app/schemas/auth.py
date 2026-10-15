@@ -86,6 +86,13 @@ class ChangePasswordRequest(BaseModel):
         return self
 
 
+class PasswordChangedResponse(BaseModel):
+    """After a password change every earlier access token, including the current one, is revoked."""
+
+    message: str
+    login_required: bool = True
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

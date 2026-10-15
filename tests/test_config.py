@@ -129,15 +129,13 @@ def test_payments_require_an_https_callback_base_url(valid_settings) -> None:
 
 def test_admin_settings_have_documented_defaults(valid_settings) -> None:
     settings = Settings(**valid_settings)
-    assert settings.admin_temp_password_bytes == 12
     assert settings.resolve_note_min_length == 10
+    assert not hasattr(settings, "admin_temp_password_bytes")
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("admin_temp_password_bytes", 11),
-        ("admin_temp_password_bytes", 33),
         ("resolve_note_min_length", 0),
         ("resolve_note_min_length", 501),
     ],
