@@ -5,7 +5,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _URL_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
@@ -62,6 +62,28 @@ class Settings(BaseSettings):
     seed_admin_phone: str = ""
     seed_admin_email: str = ""
     seed_admin_password: str = ""
+    invite_code_pepper: str = ""
+    invite_ttl_days: int = 7
+    invite_code_ttl_minutes: int = 15
+    invite_max_attempts: int = 10
+    invite_max_sends: int = 5
+    invite_resend_cooldown_seconds: int = 60
+    invite_max_pending: int = 10
+    reset_code_ttl_minutes: int = 15
+    reset_max_attempts: int = 5
+    reset_max_requests_per_hour: int = 3
+    email_provider: Literal["console", "smtp", "resend", "brevo"] = "console"
+    email_api_key: str = ""
+    email_from_name: str = "Admin via AgriSence"
+    email_from_address: str = ""
+    email_reply_to: str = ""
+    frontend_base_url: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_security: Literal["starttls", "ssl"] = "starttls"
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_timeout_seconds: int = 15
 
     @field_validator("jwt_secret")
     @classmethod
@@ -191,6 +213,107 @@ class Settings(BaseSettings):
         if not 1 <= value <= 500:
             raise ValueError("RESOLVE_NOTE_MIN_LENGTH must be between 1 and 500")
         return value
+
+    @field_validator("invite_code_pepper")
+    @classmethod
+    def validate_invite_code_pepper(cls, value: str) -> str:
+        # Empty is allowed so the rest of the API starts; invite and reset routes then return 503.
+        if value and len(value) < 32:
+            raise ValueError("INVITE_CODE_PEPPER must contain at least 32 characters")
+        return value
+
+    @field_validator("invite_ttl_days")
+    @classmethod
+    def validate_invite_ttl_days(cls, value: int) -> int:
+        if not 1 <= value <= 30:
+            raise ValueError("INVITE_TTL_DAYS must be between 1 and 30")
+        return value
+
+    @field_validator("invite_code_ttl_minutes", "reset_code_ttl_minutes")
+    @classmethod
+    def validate_code_ttl_minutes(cls, value: int) -> int:
+        if not 5 <= value <= 60:
+            raise ValueError("Code lifetimes must be between 5 and 60 minutes")
+        return value
+
+    @field_validator("invite_max_attempts", "reset_max_attempts")
+    @classmethod
+    def validate_code_max_attempts(cls, value: int) -> int:
+        if not 1 <= value <= 20:
+            raise ValueError("Code attempt limits must be between 1 and 20")
+        return value
+
+    @field_validator("invite_max_sends")
+    @classmethod
+    def validate_invite_max_sends(cls, value: int) -> int:
+        # The admin_invites check constraint allows send_count between 1 and 5.
+        if not 1 <= value <= 5:
+            raise ValueError("INVITE_MAX_SENDS must be between 1 and 5")
+        return value
+
+    @field_validator("invite_resend_cooldown_seconds")
+    @classmethod
+    def validate_invite_resend_cooldown(cls, value: int) -> int:
+        if not 10 <= value <= 3600:
+            raise ValueError("INVITE_RESEND_COOLDOWN_SECONDS must be between 10 and 3600")
+        return value
+
+    @field_validator("invite_max_pending")
+    @classmethod
+    def validate_invite_max_pending(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("INVITE_MAX_PENDING must be between 1 and 100")
+        return value
+
+    @field_validator("reset_max_requests_per_hour")
+    @classmethod
+    def validate_reset_max_requests_per_hour(cls, value: int) -> int:
+        if not 1 <= value <= 20:
+            raise ValueError("RESET_MAX_REQUESTS_PER_HOUR must be between 1 and 20")
+        return value
+
+    @field_validator("smtp_port")
+    @classmethod
+    def validate_smtp_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError("SMTP_PORT must be between 1 and 65535")
+        return value
+
+    @field_validator("smtp_timeout_seconds")
+    @classmethod
+    def validate_smtp_timeout(cls, value: int) -> int:
+        if not 1 <= value <= 120:
+            raise ValueError("SMTP_TIMEOUT_SECONDS must be between 1 and 120")
+        return value
+
+    @field_validator("email_from_name", "email_from_address", "email_reply_to", "smtp_username")
+    @classmethod
+    def reject_header_line_breaks(cls, value: str) -> str:
+        if "\r" in value or "\n" in value:
+            raise ValueError("Email header settings must not contain line breaks")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_email_settings(self) -> "Settings":
+        production = self.app_env.strip().lower() == "production"
+        if production and self.email_provider == "console":
+            raise ValueError("EMAIL_PROVIDER=console is not allowed when APP_ENV is production")
+        if self.email_provider in ("resend", "brevo") and not (self.email_api_key and self.email_from_address):
+            raise ValueError("EMAIL_PROVIDER resend and brevo require EMAIL_API_KEY and EMAIL_FROM_ADDRESS")
+        if self.email_provider == "smtp" and not all(
+            (self.smtp_host, self.smtp_port, self.smtp_username, self.smtp_password, self.email_from_address)
+        ):
+            raise ValueError(
+                "EMAIL_PROVIDER smtp requires SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and EMAIL_FROM_ADDRESS"
+            )
+        if production and not self.frontend_base_url.startswith("https://"):
+            raise ValueError("FRONTEND_BASE_URL must start with https:// when APP_ENV is production")
+        return self
+
+    @property
+    def codes_configured(self) -> bool:
+        """Report whether invite and reset codes can be hashed (the pepper is set)."""
+        return bool(self.invite_code_pepper)
 
     @property
     def payments_configured(self) -> bool:
