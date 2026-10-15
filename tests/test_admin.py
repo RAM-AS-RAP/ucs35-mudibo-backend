@@ -1,7 +1,6 @@
 """Module 6 admin API tests without a database: roles, users, moderation, orders, payments, reports."""
 
 import json
-import logging
 import re
 from datetime import date, timedelta
 from decimal import Decimal
@@ -12,11 +11,10 @@ from uuid import uuid4
 import pytest
 from payment_fakes import NOW, FakeDB, FakeResult, make_order, make_payment
 from pydantic import BaseModel, ValidationError
-from sqlalchemy.exc import IntegrityError
 
 from app.core.dependencies import get_current_user
 from app.core.errors import AppError
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_access_token, hash_password
 from app.db import get_db
 from app.models.enums import CropType, ListingStatus, OrderStatus, PaymentStatus, UserRole
 from app.models.listing import ProduceListing
@@ -36,7 +34,6 @@ from app.services import (
 from app.utils.search import contains_pattern, phone_prefix
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
-GENERIC_CONFLICT = {"error": {"code": "conflict", "message": "An account with these details already exists"}}
 
 
 def actor(role=UserRole.ADMIN, *, super_admin=False, must_change_password=False):
@@ -96,7 +93,6 @@ ADMIN_ROUTES = [
     ("get", "/api/v1/admin/users", None, admin_user_service, "list_users"),
     ("patch", f"/api/v1/admin/users/{uuid4()}/disable", None, admin_user_service, "set_user_disabled"),
     ("patch", f"/api/v1/admin/users/{uuid4()}/enable", None, admin_user_service, "set_user_disabled"),
-    ("post", f"/api/v1/admin/users/{uuid4()}/reset-password", None, admin_user_service, "reset_password"),
     ("get", "/api/v1/admin/listings", None, admin_listing_service, "list_listings"),
     ("delete", f"/api/v1/admin/listings/{uuid4()}", None, admin_listing_service, "remove_listing"),
     ("get", "/api/v1/admin/orders", None, admin_order_service, "list_orders"),
@@ -112,13 +108,6 @@ ADMIN_ROUTES = [
     ("get", f"/api/v1/admin/payments/{uuid4()}/events", None, admin_order_service, "payment_events"),
     ("get", "/api/v1/admin/stats", None, admin_report_service, "stats"),
     ("get", "/api/v1/admin/forecast-accuracy", None, admin_report_service, "forecast_accuracy"),
-    (
-        "post",
-        "/api/v1/admin/admins",
-        {"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co"},
-        None,
-        None,
-    ),
 ]
 
 
@@ -156,7 +145,7 @@ async def test_password_change_guard_applies_to_admin_routes(api_client, applica
     assert response.json()["error"]["code"] == "password_change_required"
 
 
-@pytest.mark.parametrize(("method", "path", "body", "module", "name"), ADMIN_ROUTES[:-1])
+@pytest.mark.parametrize(("method", "path", "body", "module", "name"), ADMIN_ROUTES)
 async def test_an_ordinary_admin_reaches_every_admin_route(
     api_client, application, monkeypatch, method, path, body, module, name
 ):
@@ -173,83 +162,7 @@ async def test_an_ordinary_admin_reaches_every_admin_route(
     assert reached == [name]
 
 
-async def test_only_the_super_admin_creates_admins(api_client, application):
-    install(application, actor())
-    response = await api_client.post(
-        "/api/v1/admin/admins", json={"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co"}
-    )
-    assert response.status_code == 403
-
-
-# Create admin --------------------------------------------------------------------------------
-
-
-def created_admin_row(db, created_by_name="Super Admin"):
-    """The order view of the admin the service just added, with server defaults filled in."""
-    admin = db.of_type(User)[-1]
-    admin.created_at = NOW
-    admin.is_disabled = False
-    return FakeResult(rows=[(admin, None, created_by_name, None, None)])
-
-
-async def test_create_admin_sets_role_flags_and_creator_on_the_server(api_client, application, caplog):
-    caplog.set_level(logging.DEBUG)
-    super_admin = actor(super_admin=True)
-    db = install(application, super_admin, FakeDB(results=[created_admin_row]))
-    response = await api_client.post(
-        "/api/v1/admin/admins",
-        json={"name": " New Admin ", "phone_number": "0712000001", "email": "New.Admin@Example.com"},
-    )
-    assert response.status_code == 201, response.text
-    assert response.headers["cache-control"] == "no-store"
-    body = response.json()
-    created = db.of_type(User)[0]
-    assert (created.role, created.is_super_admin, created.must_change_password) == (UserRole.ADMIN, False, True)
-    assert created.created_by == super_admin.id
-    assert (created.name, created.phone_number, created.email) == ("New Admin", "254712000001", "new.admin@example.com")
-    temporary_password = body["temporary_password"]
-    assert len(temporary_password) >= 16
-    assert created.password_hash != temporary_password
-    assert verify_password(created.password_hash, temporary_password)
-    assert "password_hash" not in response.text and created.password_hash not in response.text
-    assert body["role"] == "admin" and body["must_change_password"] is True
-    assert body["created_by_name"] == "Super Admin"
-    assert temporary_password not in caplog.text
-    assert created.password_hash not in caplog.text
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co", "role": "admin"},
-        {"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co", "is_super_admin": True},
-        {"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co", "temporary_password": "x" * 20},
-        {"name": "New Admin", "phone_number": "0712000001"},
-        {"name": "N", "phone_number": "0712000001", "email": "a@b.co"},
-        {"name": "New Admin", "phone_number": "12345", "email": "a@b.co"},
-    ],
-)
-async def test_create_admin_rejects_unknown_or_invalid_fields(api_client, application, body):
-    db = install(application, actor(super_admin=True))
-    response = await api_client.post("/api/v1/admin/admins", json=body)
-    assert response.status_code == 422
-    assert db.added == []
-
-
-@pytest.mark.parametrize("constraint", ["users_phone_number_key", "users_email_lower_unique_idx"])
-async def test_duplicate_phone_or_email_gives_the_same_generic_409(api_client, application, constraint):
-    original = Exception(f'duplicate key value violates unique constraint "{constraint}"')
-    original.sqlstate = "23505"
-    error = IntegrityError("insert into users", {}, original)
-    install(application, actor(super_admin=True), FakeDB(commit_errors=[error]))
-    response = await api_client.post(
-        "/api/v1/admin/admins", json={"name": "New Admin", "phone_number": "0712000001", "email": "a@b.co"}
-    )
-    assert response.status_code == 409
-    assert response.json() == GENERIC_CONFLICT
-
-
-async def test_a_new_admin_must_change_the_temporary_password(api_client, application):
+async def test_an_admin_who_must_change_the_password_is_blocked(api_client, application):
     new_admin = make_user(UserRole.ADMIN, must_change_password=True)
     db = FakeDB(scalars=[new_admin])
 
@@ -263,7 +176,7 @@ async def test_a_new_admin_must_change_the_temporary_password(api_client, applic
     assert response.json()["error"]["code"] == "password_change_required"
 
 
-# Disable, enable, reset ----------------------------------------------------------------------
+# Disable and enable ------------------------------------------------------------------------
 
 
 def reread_from_database(target: User):
@@ -368,37 +281,6 @@ async def test_a_disabled_users_next_request_is_401(api_client, application):
     token = create_access_token(disabled.id, disabled.role)
     response = await api_client.get("/api/v1/orders/mine", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
-
-
-async def test_reset_password_replaces_the_hash_and_forces_a_change(api_client, application, caplog):
-    caplog.set_level(logging.DEBUG)
-    target = make_user(UserRole.FARMER)
-    install(application, actor(), FakeDB(scalars=[target]))
-    response = await api_client.post(f"/api/v1/admin/users/{target.id}/reset-password")
-    assert response.status_code == 200, response.text
-    assert response.headers["cache-control"] == "no-store"
-    temporary_password = response.json()["temporary_password"]
-    assert verify_password(target.password_hash, temporary_password)
-    assert not verify_password(target.password_hash, "Original-passw0rd!")
-    assert target.must_change_password is True
-    assert temporary_password not in caplog.text
-    assert set(response.json()) == {"temporary_password"}
-
-
-async def test_reset_password_refuses_the_super_admin():
-    target = make_user(UserRole.ADMIN, is_super_admin=True)
-    with pytest.raises(AppError) as exc_info:
-        await admin_user_service.reset_password(FakeDB(scalars=[target]).session(), actor(super_admin=True), target.id)
-    assert exc_info.value.code == "cannot_modify_super_admin"
-
-
-async def test_an_ordinary_admin_cannot_reset_an_admin():
-    target = make_user(UserRole.ADMIN)
-    original_hash = target.password_hash
-    with pytest.raises(AppError) as exc_info:
-        await admin_user_service.reset_password(FakeDB(scalars=[target]).session(), actor(), target.id)
-    assert (exc_info.value.status_code, exc_info.value.code) == (403, "forbidden")
-    assert target.password_hash == original_hash
 
 
 # Users list ----------------------------------------------------------------------------------

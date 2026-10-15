@@ -104,7 +104,8 @@ async def test_forced_password_user_can_only_use_auth_exceptions(api_client, app
         headers=headers,
         json={"current_password": "temporary-password", "new_password": "New-password-123!"},
     )
-    assert changed.status_code == 204
+    assert changed.status_code == 200
+    assert changed.json()["login_required"] is True
     assert user.must_change_password is False
 
 
@@ -114,14 +115,9 @@ async def test_super_admin_route_rejects_ordinary_admin(api_client, application)
     application.dependency_overrides[get_db] = make_db_override(FakeSession(user))
     token = create_access_token(user.id, "admin")
     response = await api_client.post(
-        "/api/v1/admin/admins",
+        "/api/v1/admin/invites",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "name": "New Admin",
-            "phone_number": "0712345678",
-            "email": "new@example.com",
-            "temporary_password": "temporary123",
-        },
+        json={"name": "New Admin", "phone_number": "0712345678", "email": "new@example.com"},
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "forbidden"
