@@ -30,6 +30,7 @@ from payment_fakes import (
     use_settings,
     view_row,
 )
+from response_helpers import without_request_id
 from sqlalchemy.exc import IntegrityError
 
 from app.core.dependencies import get_current_user
@@ -127,7 +128,8 @@ async def test_another_buyers_order_is_the_same_404_as_a_missing_one(api_client,
     foreign = await post_pay(api_client, uuid4())
     missing = await post_pay(api_client, uuid4())
     assert foreign.status_code == missing.status_code == 404
-    assert foreign.json() == missing.json() == {"error": {"code": "order_not_found", "message": "Order not found."}}
+    expected = {"error": {"code": "order_not_found", "message": "Order not found."}}
+    assert without_request_id(foreign.json()) == without_request_id(missing.json()) == expected
     order_locks = [sql for sql in db.statements if "FROM orders" in sql]
     assert order_locks and all("orders.buyer_id = " in sql and "FOR UPDATE" in sql for sql in order_locks)
     assert daraja.pushes == []
@@ -383,7 +385,7 @@ async def test_rejected_or_unconfirmed_push_fails_the_payment(
     install(application, db, buyer, FakeDaraja(db, **daraja_kwargs))
     response = await post_pay(api_client, order.id)
     assert response.status_code == 502
-    assert response.json() == {
+    assert without_request_id(response.json()) == {
         "error": {
             "code": "payment_request_failed",
             "message": "Could not start the M-Pesa prompt. Please try again.",

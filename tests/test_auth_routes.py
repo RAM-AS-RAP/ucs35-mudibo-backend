@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from response_helpers import without_request_id
 
 from app.core.dependencies import get_current_user
 from app.core.errors import ConflictError
@@ -141,7 +142,9 @@ async def test_duplicate_registration_returns_generic_conflict(
         },
     )
     assert response.status_code == 409
-    assert response.json() == {"error": {"code": "conflict", "message": "An account with these details already exists"}}
+    assert without_request_id(response.json()) == {
+        "error": {"code": "conflict", "message": "An account with these details already exists"}
+    }
 
 
 @pytest.mark.asyncio
@@ -169,7 +172,7 @@ async def test_login_failures_have_identical_responses(api_client, application) 
     ]:
         application.dependency_overrides[get_db] = make_session_override(FakeSession(user))
         response = await api_client.post("/api/v1/auth/login", json={"identifier": identifier, "password": password})
-        responses.append((response.status_code, response.json()))
+        responses.append((response.status_code, without_request_id(response.json())))
     assert responses == [(401, expected)] * 3
 
 
