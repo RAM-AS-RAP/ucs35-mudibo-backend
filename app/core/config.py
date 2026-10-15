@@ -4,12 +4,35 @@ import re
 from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _URL_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
 _PHONE = re.compile(r"254[17][0-9]{8}")
+_HOST_NAME = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?")
+
+
+def split_csv(value: str) -> list[str]:
+    """Split a comma separated setting into trimmed, non-empty items."""
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def origin_problem(origin: str) -> str | None:
+    """Return why ``origin`` is not a bare http(s) origin (scheme, host, optional port), or None."""
+    parts = urlsplit(origin)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return "must start with http:// or https:// and name a host"
+    if parts.username is not None or parts.password is not None:
+        return "must not contain credentials"
+    if parts.path or parts.query or parts.fragment or origin.endswith(("?", "#")):
+        return "must not contain a path, query or fragment (no trailing slash)"
+    try:
+        parts.port
+    except ValueError:
+        return "has an invalid port"
+    return None
 
 
 class Settings(BaseSettings):
@@ -83,6 +106,53 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_timeout_seconds: int = 15
+    log_format: Literal["json", "text"] = "text"
+    max_json_body_bytes: int = 65_536
+    db_statement_timeout_ms: int = 15_000
+    db_lock_timeout_ms: int = 5_000
+    # Empty means "*" outside production; production requires explicit host names.
+    allowed_hosts: str = ""
+    # A development and test aid only; refused when APP_ENV is production.
+    rate_limits_disabled: bool = False
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def normalize_log_format(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("max_json_body_bytes")
+    @classmethod
+    def validate_max_json_body_bytes(cls, value: int) -> int:
+        if not 1024 <= value <= 10_485_760:
+            raise ValueError("MAX_JSON_BODY_BYTES must be between 1024 and 10485760")
+        return value
+
+    @field_validator("db_statement_timeout_ms", "db_lock_timeout_ms")
+    @classmethod
+    def validate_db_timeouts(cls, value: int) -> int:
+        # 0 disables the timeout; otherwise between 100 ms and 10 minutes.
+        if value != 0 and not 100 <= value <= 600_000:
+            raise ValueError("DB_STATEMENT_TIMEOUT_MS and DB_LOCK_TIMEOUT_MS must be 0 or between 100 and 600000")
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def validate_allowed_hosts(cls, value: str) -> str:
+        for host in split_csv(value):
+            if host != "*" and not _HOST_NAME.fullmatch(host):
+                raise ValueError("ALLOWED_HOSTS must be comma separated host names (no scheme or path)")
+        return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def validate_cors_origins(cls, value: str) -> str:
+        for origin in split_csv(value):
+            if origin == "*":
+                continue  # rejected in production by validate_production_edges
+            problem = origin_problem(origin)
+            if problem is not None:
+                raise ValueError(f"Each CORS_ORIGINS entry {problem}")
+        return value
 
     @field_validator("jwt_secret")
     @classmethod
@@ -302,6 +372,28 @@ class Settings(BaseSettings):
             raise ValueError("FRONTEND_BASE_URL must start with https:// when APP_ENV is production")
         return self
 
+    @model_validator(mode="after")
+    def validate_production_edges(self) -> "Settings":
+        if not self.is_production:
+            return self
+        if "*" in split_csv(self.cors_origins):
+            raise ValueError("CORS_ORIGINS must not contain * when APP_ENV is production")
+        hosts = split_csv(self.allowed_hosts)
+        if not hosts or any("*" in host for host in hosts):
+            raise ValueError("ALLOWED_HOSTS must list explicit host names (no *) when APP_ENV is production")
+        if self.rate_limits_disabled:
+            raise ValueError("RATE_LIMITS_DISABLED is not allowed when APP_ENV is production")
+        return self
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() == "production"
+
+    @property
+    def allowed_host_list(self) -> list[str]:
+        """Hosts for TrustedHostMiddleware; ``["*"]`` when unset outside production."""
+        return split_csv(self.allowed_hosts) or ["*"]
+
     @property
     def codes_configured(self) -> bool:
         """Report whether invite and reset codes can be hashed (the pepper is set)."""
@@ -324,7 +416,7 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         """Return configured CORS origins as trimmed values."""
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return split_csv(self.cors_origins)
 
 
 @lru_cache
