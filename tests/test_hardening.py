@@ -112,7 +112,10 @@ async def test_wrong_method_uses_the_uniform_body() -> None:
 
 async def test_validation_errors_carry_the_request_id_and_never_echo_a_password() -> None:
     secret = "Unique-Submitted-Secret-123!"
-    async with client_for(create_app(make_settings())) as client:
+    application = create_app(make_settings())
+    # The route's session dependency resolves before body validation; never let it need DATABASE_URL.
+    application.dependency_overrides[get_db] = _fake_db
+    async with client_for(application) as client:
         response = await client.post(
             "/api/v1/auth/register/farmer",
             json={"name": "A", "phone_number": "bad", "password": secret, "role": "admin"},
