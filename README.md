@@ -404,6 +404,38 @@ ALLOW_CONCURRENCY_CHECK=1 python -m scripts.check_checkout_concurrency
 
 In Windows PowerShell, set `$env:ALLOW_CONCURRENCY_CHECK = "1"` first. **Warning:** the script writes committed rows to the database in `DATABASE_URL`, so use only a local or disposable database. It refuses to run when `APP_ENV=production`. It deletes the orders and listings it creates, but users cannot be deleted, so six disabled `ZZ_TEST_` users remain after each run. It prints PASS or FAIL per scenario and exits non-zero on failure.
 
+### Contract, inventory and security checks
+
+The normal `pytest` run also checks that:
+
+- every route is listed once in `tests/route_matrix.py` (the authorization inventory), and every role outside a route's allowed set gets 401 or 403;
+- every route has one `### METHOD /api/v1/path` heading in `docs/api.md`;
+- `docs/openapi.json` matches the application (`tests/test_openapi_snapshot.py`). After changing any route or schema, regenerate it with `python scripts/export_openapi.py` and commit the file;
+- the sources in `app/` and `scripts/` contain no formatted SQL in `text()`, no `eval`, `pickle`, `subprocess`, disabled TLS checks, `print` in `app/`, float money, secret-looking literals or production Daraja options (`tests/test_source_security.py`).
+
+CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest -q -m "not db"` on every push to `main` and every pull request, plus a non-blocking `pip-audit` job. It uses no secrets.
+
+### Scripts
+
+| Script | Purpose |
+| --- | --- |
+| `python scripts/check_config.py` | Checks the current environment's settings (OK, MISSING, WEAK, INVALID per area) without printing any value; exit code 1 when anything needs attention. |
+| `python scripts/export_openapi.py` | Writes `docs/openapi.json`, the frontend contract. |
+| `python scripts/e2e_check.py` | Manual end-to-end check of the farmer, buyer and admin journeys against a running server. See [docs/testing.md](docs/testing.md). |
+| `python -m scripts.seed_demo_data` | Creates demo farmers, buyers and listings for frontend work (never in production). |
+| `python -m scripts.seed_admin` | One-time super admin seed. |
+
+## Documentation
+
+- [docs/api.md](docs/api.md): endpoint reference.
+- [docs/frontend_contract.md](docs/frontend_contract.md): what the frontend repository needs (auth, errors, screens, payments, uploads, type generation).
+- [docs/security.md](docs/security.md): security controls and known limitations.
+- [docs/testing.md](docs/testing.md): unit, database, concurrency and end-to-end checks.
+- [docs/backup.md](docs/backup.md): logical backups with `pg_dump`.
+- [docs/deployment.md](docs/deployment.md): deployment checklist.
+- [docs/ci.md](docs/ci.md): what the CI pipeline checks.
+- [docs/decisions.md](docs/decisions.md), [docs/schema.md](docs/schema.md), [docs/payments.md](docs/payments.md), [docs/admin.md](docs/admin.md), [docs/email.md](docs/email.md).
+
 ## Implemented scope
 
 Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) and the admin APIs (admin invitations by emailed code, users, listing moderation, order and payment review, reconciliation, statistics and forecast accuracy; see `docs/admin.md`) have service implementations. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
@@ -415,6 +447,8 @@ Run behind a trusted reverse proxy that sets `X-Forwarded-For`. Restrict `--forw
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-allow-ips="*"
 ```
+
+Before deploying, run `python scripts/check_config.py` in the target environment and follow [docs/deployment.md](docs/deployment.md).
 
 ## Environment reference
 
@@ -428,7 +462,7 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `JWT_SECRET` | Token signing secret; minimum 32 characters. |
 | `JWT_ALGORITHM` | Access-token signing algorithm. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifetime, from 5 to 1440 minutes. |
-| `CORS_ORIGINS` | Comma-separated allowed frontend origins. |
+| `CORS_ORIGINS` | Comma-separated allowed frontend origins, each `scheme://host[:port]` with no path or trailing slash; no `*` in production. |
 | `LOGIN_MAX_FAILURES` | Failed identifier attempts allowed per window. |
 | `LOGIN_FAILURE_WINDOW_MINUTES` | Per-identifier throttle window. |
 | `MPESA_ENV` | Must remain `sandbox`. |
@@ -479,6 +513,12 @@ uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers --forwarded-a
 | `SMTP_SECURITY` | `starttls` (port 587, default) or `ssl` (port 465). Certificate verification is always on. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | SMTP login; for Gmail the account address and an app password, never the normal password. |
 | `SMTP_TIMEOUT_SECONDS` | SMTP connection and command timeout, 1 to 120 (default 15). |
+| `LOG_FORMAT` | `text` (default) or `json` (one JSON object per line with `time`, `level`, `logger`, `message`, `request_id`, `method`, `path`, `status`, `duration_ms`). |
+| `MAX_JSON_BODY_BYTES` | Largest JSON or form request body, 1024 to 10485760 (default 65536); larger bodies get 413 `payload_too_large`. The two multipart listing routes allow `MAX_IMAGE_BYTES` + 64 KiB. |
+| `DB_STATEMENT_TIMEOUT_MS` | `SET LOCAL statement_timeout` for every transaction, 0 (off) or 100 to 600000 (default 15000). |
+| `DB_LOCK_TIMEOUT_MS` | `SET LOCAL lock_timeout` for every transaction, 0 (off) or 100 to 600000 (default 5000). |
+| `ALLOWED_HOSTS` | Comma-separated host names accepted in the `Host` header. Empty means `*` outside production; required (no `*`) in production. |
+| `RATE_LIMITS_DISABLED` | `true` turns the in-memory rate limits off for development and the end-to-end script; refused in production (default `false`). |
 
 ## Payments and credentials
 

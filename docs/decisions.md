@@ -55,3 +55,15 @@
 - Disabled farmers' listings are hidden from buyers (browse, detail and checkout), not deleted; enabling the farmer restores them.
 - Resolutions of `needs_reconciliation` orders are recorded as `admin_action` payment events; refunds are handled outside the platform.
 - Forecast accuracy is reported separately for backfilled and live forecasts, and pending forecasts are excluded from the metrics.
+
+# Hardening decisions (Module 7)
+
+- Request ids: every request gets a UUID in `X-Request-ID` (a client-supplied id is reused only when it is a valid UUID), and the same id is in every error body and every log line, so a user can quote it to support.
+- Body limits: JSON and form bodies are capped at `MAX_JSON_BODY_BYTES` (64 KiB) and the two multipart listing routes at `MAX_IMAGE_BYTES` + 64 KiB, checked from `Content-Length` and again while streaming; the Daraja callback keeps its own `CALLBACK_MAX_BYTES` rule.
+- Statement and lock timeouts are applied with `SET LOCAL` at the start of every transaction (engine `begin` event), because the Supabase transaction pooler does not accept startup parameters; setting both to 0 turns the feature off.
+- Error mapping: database connection failures and pool timeouts return 503 `service_unavailable` (`Retry-After: 5`), lock timeouts, deadlocks and serialization failures return 503 `busy` (`Retry-After: 1`), and every other unexpected error returns a generic 500 with only the request id; driver text and SQL never reach a response.
+- Every response is `Cache-Control: no-store`: the API serves personal and fast-changing data, and nothing is safe to cache in a shared or browser cache.
+- `tests/route_matrix.py` is the single authorization inventory: a test fails when a route is missing from it, and every role outside a route's set must get 401 or 403 before validation or database access.
+- `docs/openapi.json` is the frontend contract: the frontend generates its types from it, and a test fails when it differs from the application.
+- `Retry-After` on 429 is computed from slowapi's window statistics in the exception handler, because slowapi 0.1.10's `headers_enabled=True` raises for routes that return a model and take no `response` parameter.
+- CORS sits outside the host check, the body limit and the generic 500 handler, so the browser can read those error bodies; credentials are never allowed because the API uses bearer tokens, not cookies.

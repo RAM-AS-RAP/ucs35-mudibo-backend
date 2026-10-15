@@ -1,0 +1,55 @@
+# Deployment checklist
+
+A checklist only. This repository contains no deployment configuration on purpose. Work through it top to bottom for each deployment.
+
+## Before deploying
+
+- [ ] `python scripts/check_config.py` passes (exit code 0) **in the target environment**, with the production variables loaded.
+- [ ] `APP_ENV=production`. This disables `/docs`, `/redoc` and `/openapi.json`, turns on HSTS, and enforces the production setting rules.
+- [ ] `JWT_SECRET` and `INVITE_CODE_PEPPER` are **newly generated for production** (`python -c "import secrets; print(secrets.token_urlsafe(48))"`), never copied from development.
+- [ ] `CORS_ORIGINS` is set to the real frontend origin(s), exact `https://host`, with no wildcard and no trailing slash.
+- [ ] `ALLOWED_HOSTS` is set to the real API host name(s).
+- [ ] `MPESA_CALLBACK_BASE_URL` is the public `https://` address of this API, and `MPESA_CALLBACK_TOKEN` is a new random token of at least 32 characters.
+- [ ] `EMAIL_PROVIDER` is an HTTPS provider (`resend` or `brevo`) with `EMAIL_FROM_ADDRESS` set, and `FRONTEND_BASE_URL` is the `https://` frontend address.
+- [ ] `RATE_LIMITS_DISABLED` is unset or `false` (production refuses `true`).
+- [ ] `DATABASE_URL` uses the Supabase transaction pooler (port 6543).
+- [ ] All migrations in `supabase/migrations/` are pushed to the production project, and the checks in `supabase/verification/` pass.
+- [ ] The super admin is seeded (`python -m scripts.seed_admin`), has logged in once, and has changed the initial password. `SEED_ADMIN_PASSWORD` has been removed from the environment.
+- [ ] The ML pipeline's last run is green, and `GET /api/v1/admin/stats` shows current prices and forecasts (`pipeline.series[].forecast_current`).
+- [ ] The Supabase project is not paused (free projects pause after a period of inactivity).
+- [ ] A fresh backup has been taken ([backup.md](backup.md)).
+- [ ] `docs/openapi.json` is up to date (`pytest` passes), and the frontend was built against it.
+
+## Start command
+
+Run one instance (see the caveats), behind the host's HTTPS proxy:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+```
+
+`--proxy-headers` lets the rate limiter and logs see the client IP from `X-Forwarded-For`. Only use `--forwarded-allow-ips="*"` when the app is reachable solely through the host's proxy; otherwise list the proxy addresses. Set `LOG_FORMAT=json` if the host collects structured logs.
+
+## After deploying
+
+Run these in order, against the deployed address:
+
+1. `GET /api/v1/health` returns `{"status": "ok"}`, and `GET /api/v1/health/db` returns `{"status": "ok"}`. Both responses have `X-Request-ID`, `Cache-Control: no-store` and `Strict-Transport-Security`.
+2. `GET /docs` returns 404 (docs disabled).
+3. Log in as the super admin from the deployed frontend. This also checks CORS from the real origin.
+4. Make one sandbox payment end to end with a test buyer: order, pay, approve the prompt on the sandbox test number, and see the order become `paid`. Check that the callback reached the API (the access log shows `/api/v1/payments/callback/***`).
+5. `POST /api/v1/admin/email/test` as the super admin returns `{"email_sent": true}`, and the email arrives.
+6. Run the end-to-end script against the deployed API, with rate limits on (expect the registration and login limits to make some steps fail if run repeatedly):
+
+   ```bash
+   E2E_BASE_URL=https://<api host> E2E_ALLOW_REMOTE=1 \
+   E2E_ADMIN_IDENTIFIER=... E2E_ADMIN_PASSWORD=... python scripts/e2e_check.py
+   ```
+
+   Its cleanup disables the `ZZ_E2E_` users it created.
+
+## Hosting caveats
+
+- **Free instances sleep.** After a period without traffic, the first request can take 30 to 60 seconds while the instance wakes up. Wake the API before a demonstration, and expect Daraja callbacks to a sleeping instance to arrive late; order reads then reconcile the payment.
+- **Free instances usually block outbound SMTP ports** (25, 465, 587), so `EMAIL_PROVIDER=smtp` will not deliver from them. Use an HTTPS email provider (`resend` or `brevo`) or a host that allows SMTP.
+- **Rate limits are kept in process memory**, so run exactly one instance (one process, no autoscaling). With several instances, each would keep its own counters and the limits would multiply. Restarts reset the counters.
