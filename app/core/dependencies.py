@@ -1,6 +1,8 @@
 """Authentication, role authorization, and password-change dependencies."""
 
+import math
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -39,9 +41,24 @@ async def get_current_user_any(
     except (jwt.InvalidTokenError, KeyError, TypeError, ValueError) as exc:
         raise _unauthorized() from exc
     user = await session.scalar(select(User).where(User.id == user_id))
-    if user is None or user.is_disabled:
+    if user is None or user.is_disabled or _issued_before_password_change(claims, user):
         raise _unauthorized()
     return user
+
+
+def _issued_before_password_change(claims: dict[str, Any], user: User) -> bool:
+    """A token issued before the last password change is revoked.
+
+    ``iat`` has whole-second precision, so it is compared with the whole second of the change: a token
+    issued in the same second as the change stays valid.
+    """
+    changed_at = getattr(user, "password_changed_at", None)
+    if not isinstance(changed_at, datetime):
+        return False
+    issued_at = claims.get("iat")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, int | float):
+        return True
+    return issued_at < math.floor(changed_at.timestamp())
 
 
 def get_current_user(user: User = Depends(get_current_user_any)) -> User:

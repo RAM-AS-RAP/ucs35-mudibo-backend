@@ -1,6 +1,6 @@
 """Registration and authentication routes."""
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,12 +9,20 @@ from app.core.dependencies import get_current_user_any
 from app.db import get_db
 from app.models.enums import UserRole
 from app.models.user import User
-from app.schemas.auth import ChangePasswordRequest, LoginRequest, RegisterRequest, TokenResponse
+from app.schemas.auth import (
+    ChangePasswordRequest,
+    LoginRequest,
+    PasswordChangedResponse,
+    RegisterRequest,
+    TokenResponse,
+)
 from app.schemas.user import UserOut
 from app.services import auth_service
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+PASSWORD_CHANGED = "Password changed. Log in again: your current access token is no longer accepted."
 
 
 @router.post("/register/farmer", response_model=UserOut, status_code=201)
@@ -38,14 +46,14 @@ async def login(request: Request, body: LoginRequest, session: AsyncSession = De
     return await auth_service.login(session, body.identifier, body.password)
 
 
-@router.post("/change-password", status_code=204, response_class=Response)
+@router.post("/change-password", response_model=PasswordChangedResponse)
 async def change_password(
     body: ChangePasswordRequest,
     user: User = Depends(get_current_user_any),
     session: AsyncSession = Depends(get_db),
-) -> Response:
+) -> PasswordChangedResponse:
     await auth_service.change_password(session, user, body.current_password, body.new_password)
-    return Response(status_code=204)
+    return PasswordChangedResponse(message=PASSWORD_CHANGED, login_required=True)
 
 
 @router.get("/me", response_model=UserOut)
