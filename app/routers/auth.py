@@ -1,6 +1,8 @@
-"""Registration and authentication routes."""
+"""Registration, authentication and invite acceptance routes."""
 
-from fastapi import APIRouter, Depends, Request
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,12 +18,15 @@ from app.schemas.auth import (
     RegisterRequest,
     TokenResponse,
 )
+from app.schemas.invite import AcceptedOut, AcceptInviteRequest, EmailRequest
 from app.schemas.user import UserOut
-from app.services import auth_service
+from app.services import auth_service, invite_service
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+NO_STORE = "no-store"
+INVITE_CODE_REQUESTED = "If an invitation exists for this address, a new code has been sent."
 PASSWORD_CHANGED = "Password changed. Log in again: your current access token is no longer accepted."
 
 
@@ -59,3 +64,26 @@ async def change_password(
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user_any)) -> User:
     return user
+
+
+@router.post("/accept-invite", response_model=UserOut, status_code=201)
+@limiter.limit("5/minute")
+async def accept_invite(
+    request: Request, response: Response, body: AcceptInviteRequest, session: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
+    del request
+    response.headers["Cache-Control"] = NO_STORE
+    return await invite_service.accept_invite(session, body)
+
+
+@router.post("/invite/request-code", response_model=AcceptedOut, status_code=202)
+@limiter.limit("3/hour")
+async def request_invite_code(
+    request: Request,
+    body: EmailRequest,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db),
+) -> AcceptedOut:
+    del request
+    await invite_service.request_invite_code(session, body.email, background_tasks)
+    return AcceptedOut(message=INVITE_CODE_REQUESTED)
