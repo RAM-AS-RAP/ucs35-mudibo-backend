@@ -10,18 +10,36 @@ There is exactly one super admin. It is created once per environment from the co
 2. Run `python -m scripts.seed_admin`. Without `SEED_ADMIN_PASSWORD` it asks for the password twice.
 3. Remove `SEED_ADMIN_PASSWORD` from `.env`, log in, and change the password when asked.
 
-The database protects the super admin: it cannot be disabled, demoted, deleted, or have its password reset by another admin.
+The database protects the super admin: it cannot be disabled, demoted or deleted. No admin can set or see another person's password.
 
-## Creating other admins
+Before inviting anyone, configure email (see [email.md](email.md)) and set `INVITE_CODE_PEPPER` (at least 32 random characters, for example from `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Then check delivery from the deployed server with `POST /api/v1/admin/email/test`, which sends a short message to your own address.
 
-Only the super admin can create admins.
+## Inviting other admins
 
-1. Call `POST /api/v1/admin/admins` with the new admin's name, phone number and email.
-2. The response contains a `temporary_password`. It is shown only once and is never stored in plain text, so copy it immediately.
-3. Give it to the new admin through a private channel (in person or a direct call), never by group chat or email.
-4. The new admin logs in and must change the password before any other request works.
+Only the super admin can invite admins. Nobody ever sees a password or a code in an API response.
 
-If a temporary password is lost, the super admin resets it with `POST /api/v1/admin/users/{id}/reset-password`.
+**Super admin:**
+
+1. Call `POST /api/v1/admin/invites` with the new admin's name, phone number and email address.
+2. The server emails an 8-character code (shown as `XXXX-XXXX`) to that address. The response only confirms it, with masked contact details and `email_sent`.
+3. Tell the person to expect the email (and to check the spam folder). The invite stays open for 7 days; each code works for 15 minutes.
+4. Follow progress with `GET /api/v1/admin/invites` (`pending`, `used`, `expired`, `revoked`, `locked`).
+
+If `email_sent` is `false`, fix the email configuration and call `POST /api/v1/admin/invites/{id}/resend`.
+
+**Invited person:**
+
+1. Open `<FRONTEND_BASE_URL>/accept-invite`.
+2. Enter your email address, the code and a password of your own (at least 12 characters, not your email, name or phone number, and not a common password).
+3. Log in with your email or phone number and that password. No password change is forced, because you chose it yourself.
+
+### When a code expires, is lost, or the invite locks
+
+- **The code expired (after 15 minutes) or the email was lost:** the invited person requests a new code on the accept page (`POST /api/v1/auth/invite/request-code`), or the super admin calls `POST /api/v1/admin/invites/{id}/resend`. The old code stops working. Resends wait 60 seconds between sends and stop after 5 sends per invite.
+- **The invite expired (after 7 days), reached the send limit, or locked** (10 wrong codes in total; resending never resets this count): create a new invite with `POST /api/v1/admin/invites`. It replaces the old one automatically.
+- **The wrong person was invited:** revoke the invite with `DELETE /api/v1/admin/invites/{id}`.
+
+Every failed code entry gets the same "invalid or expired code" answer, whatever the reason, so an attacker learns nothing. Look at the invite's `status` and `attempts` in the invite list to see what happened.
 
 ## Disabling and enabling accounts
 
@@ -30,9 +48,17 @@ If a temporary password is lost, the super admin resets it with `POST /api/v1/ad
 - `PATCH /api/v1/admin/users/{id}/enable` restores access.
 - Any admin can disable farmers and buyers. Only the super admin can disable or enable another admin. Nobody can disable the super admin or themselves.
 
-## Resetting a password
+## Forgotten passwords
 
-`POST /api/v1/admin/users/{id}/reset-password` returns a new temporary password once and forces a change at the next login. Existing access tokens keep working until they expire (60 minutes by default), because tokens carry no password version. To lock someone out immediately, disable the account instead.
+Admins (including the super admin), farmers and buyers reset their own passwords by email; no admin route resets a password.
+
+1. Open `<FRONTEND_BASE_URL>/reset-password` and enter the account's email address. The answer is always the same, whether or not the address exists.
+2. Enter the 8-character code from the email (valid for 15 minutes) and a new password. Admins need at least 12 characters, farmers and buyers at least 8.
+3. Log in again. Every token issued before the change stops working at once, on all devices.
+
+At most 3 codes are sent per account per hour, at least 60 seconds apart, and a code locks after 5 wrong tries; request a new one in that case. Disabled accounts get no code. Farmers and buyers who registered without an email address cannot reset a forgotten password (a documented limitation); to lock someone out immediately, disable the account.
+
+Changing a password while logged in (`POST /api/v1/auth/change-password`) also revokes older tokens, including the one used for the request, so log in again afterwards.
 
 ## Removing a listing
 
