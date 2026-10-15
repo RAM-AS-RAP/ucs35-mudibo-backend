@@ -2,13 +2,48 @@
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from weakref import WeakSet
 
+from sqlalchemy import Engine, event
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+# Sync engines whose transactions get the statement and lock timeouts. Only the application engine is
+# added by default; a test engine gets them only when a test calls ``enable_transaction_timeouts``.
+_TIMEOUT_ENGINES: WeakSet[Engine] = WeakSet()
+
+
+def _set_transaction_timeouts(connection: Connection) -> None:
+    """Engine ``begin`` listener: bound every statement and lock wait in this transaction.
+
+    Supabase's transaction pooler (port 6543) does not support startup parameters such as
+    ``server_settings={"statement_timeout": ...}``, and a plain ``SET`` would leak to whichever client
+    gets the server connection next. ``SET LOCAL`` lasts only until the end of the current transaction,
+    so it is issued at the start of every transaction. SQLAlchemy suppresses autobegin while this event
+    runs, so executing here cannot recurse. If this ever conflicts with the pooler, set both
+    ``DB_STATEMENT_TIMEOUT_MS`` and ``DB_LOCK_TIMEOUT_MS`` to 0 to disable the feature entirely.
+    """
+    if connection.engine not in _TIMEOUT_ENGINES:
+        return
+    settings = get_settings()
+    # Values are validated integers (0 or 100..600000); SET cannot take bind parameters.
+    if settings.db_statement_timeout_ms > 0:
+        connection.exec_driver_sql(f"SET LOCAL statement_timeout = {int(settings.db_statement_timeout_ms)}")
+    if settings.db_lock_timeout_ms > 0:
+        connection.exec_driver_sql(f"SET LOCAL lock_timeout = {int(settings.db_lock_timeout_ms)}")
+
+
+def enable_transaction_timeouts(engine: AsyncEngine) -> None:
+    """Apply ``SET LOCAL statement_timeout`` and ``lock_timeout`` at the start of each transaction."""
+    sync_engine = engine.sync_engine
+    _TIMEOUT_ENGINES.add(sync_engine)
+    if not event.contains(sync_engine, "begin", _set_transaction_timeouts):
+        event.listen(sync_engine, "begin", _set_transaction_timeouts)
 
 
 def get_engine() -> AsyncEngine:
@@ -29,6 +64,7 @@ def get_engine() -> AsyncEngine:
             pool_recycle=1800,
             connect_args={"statement_cache_size": 0},
         )
+        enable_transaction_timeouts(_engine)
     return _engine
 
 
