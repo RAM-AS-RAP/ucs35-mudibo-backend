@@ -11,6 +11,7 @@ import pytest
 from fastapi import BackgroundTasks
 from invite_fakes import NO_ROW, FakeMailer, RecordingDB, configure_codes, install, reset_attempt, rows
 from payment_fakes import FakeDB
+from response_helpers import without_request_id
 
 from app.core.codes import format_code, generate_code, hash_code
 from app.core.config import get_settings
@@ -198,7 +199,7 @@ async def test_every_reset_failure_returns_the_identical_400(api_client, applica
         db = install(application, None, RecordingDB(results=results))
         response = await api_client.post("/api/v1/auth/password-reset/confirm", json=confirm_body(code))
         assert response.status_code == 400, name
-        bodies.append(response.json())
+        bodies.append(without_request_id(response.json()))
         assert db.commits >= 1, name
     assert bodies == [GENERIC_FAILURE] * len(bodies)
 

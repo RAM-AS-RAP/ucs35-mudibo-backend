@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from response_helpers import without_request_id
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
@@ -407,7 +408,8 @@ async def test_removed_and_unknown_listing_details_are_identical_404s(api_client
     removed = await api_client.get(f"/api/v1/listings/{uuid4()}")
     unknown = await api_client.get(f"/api/v1/listings/{uuid4()}")
     assert removed.status_code == unknown.status_code == 404
-    assert removed.json() == unknown.json() == {"error": {"code": "listing_not_found", "message": "Listing not found."}}
+    expected = {"error": {"code": "listing_not_found", "message": "Listing not found."}}
+    assert without_request_id(removed.json()) == without_request_id(unknown.json()) == expected
 
 
 # Order validation ----------------------------------------------------------------------------
@@ -763,7 +765,8 @@ async def test_other_buyers_order_is_the_same_404_as_a_missing_one(api_client, a
     foreign = await api_client.get(f"/api/v1/orders/{uuid4()}")
     missing = await api_client.get(f"/api/v1/orders/{uuid4()}")
     assert foreign.status_code == missing.status_code == 404
-    assert foreign.json() == missing.json() == {"error": {"code": "order_not_found", "message": "Order not found."}}
+    expected = {"error": {"code": "order_not_found", "message": "Order not found."}}
+    assert without_request_id(foreign.json()) == without_request_id(missing.json()) == expected
 
 
 async def test_my_orders_lists_own_orders_in_one_query():

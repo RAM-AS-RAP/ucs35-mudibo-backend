@@ -38,5 +38,6 @@ class DecimalOutput(BaseModel):
     @field_serializer("*", when_used="json")
     def serialize_decimal(self, value: object) -> object:
         if isinstance(value, Decimal):
+            # float-ok: display serializer; money stays Decimal and becomes a JSON number only here.
             return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
         return value

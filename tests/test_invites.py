@@ -23,6 +23,7 @@ from invite_fakes import (
     updated_invite,
 )
 from payment_fakes import NOW, FakeDB, FakeResult
+from response_helpers import without_request_id
 from sqlalchemy.exc import IntegrityError
 
 from app.core.codes import format_code, generate_code, hash_code, verify_code
@@ -577,7 +578,7 @@ async def test_every_accept_failure_returns_the_identical_400(api_client, applic
         db = install(application, None, RecordingDB(results=results))
         response = await api_client.post("/api/v1/auth/accept-invite", json=accept_body(code))
         assert response.status_code == 400, name
-        bodies.append(response.json())
+        bodies.append(without_request_id(response.json()))
         assert db.commits >= 1, name  # the attempt is always committed
     assert bodies == [GENERIC_FAILURE] * len(bodies)
 
@@ -632,7 +633,7 @@ async def test_accept_checks_the_admin_password_policy_before_the_code(api_clien
     db = install(application, None)
     response = await api_client.post("/api/v1/auth/accept-invite", json=accept_body("ABCD-EFGH", password))
     assert response.status_code == 422
-    assert response.json()["error"] == {
+    assert without_request_id(response.json())["error"] == {
         "code": "password_too_weak",
         "message": "The password is too weak.",
         "reason": reason,

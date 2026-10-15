@@ -11,6 +11,7 @@ import httpx
 import pytest
 from invite_fakes import FakeMailer, install, person
 from pydantic import ValidationError
+from response_helpers import without_request_id
 
 from app.core.config import Settings
 from app.integrations import email as email_integration
@@ -29,6 +30,8 @@ def settings_for(provider, **overrides) -> Settings:
         "jwt_secret": "test-only-jwt-secret-at-least-thirty-two-characters",
         "email_provider": provider,
         "email_from_address": FROM_ADDRESS,
+        # Production settings also require explicit allowed hosts (Module 7).
+        "allowed_hosts": "api.agrisence.test",
     }
     if provider in ("resend", "brevo"):
         values["email_api_key"] = API_KEY
@@ -395,7 +398,7 @@ async def test_email_check_failure_returns_only_the_category(api_client, applica
     install(application, person(super_admin=True))
     response = await api_client.post("/api/v1/admin/email/test")
     assert response.status_code == 502
-    assert response.json() == {
+    assert without_request_id(response.json()) == {
         "error": {"code": "email_failed", "message": "The email could not be sent.", "category": "auth_failed"}
     }
 

@@ -179,16 +179,21 @@ async def forecast_accuracy(
     """
     clauses, params = _accuracy_filters(market, crop, horizon, is_backfill)
     item_clauses = clauses if include_pending else [*clauses, "not is_pending"]
+    # The where clauses are constant fragments from _accuracy_filters; values are always bound parameters.
     total = int(
-        await session.scalar(text(f"select count(*) from public.forecast_accuracy{_where(item_clauses)}"), params) or 0
+        await session.scalar(text("select count(*) from public.forecast_accuracy" + _where(item_clauses)), params)
+        or 0
     )
     rows = (
         (
             await session.execute(
                 text(
-                    f"select {ACCURACY_COLUMNS} from public.forecast_accuracy{_where(item_clauses)} "
-                    "order by origin_month desc, target_month desc, market, crop, horizon "
-                    "limit :limit offset :offset"
+                    "select "
+                    + ACCURACY_COLUMNS
+                    + " from public.forecast_accuracy"
+                    + _where(item_clauses)
+                    + " order by origin_month desc, target_month desc, market, crop, horizon"
+                    + " limit :limit offset :offset"
                 ),
                 {**params, "limit": pagination.limit, "offset": pagination.offset},
             )
@@ -200,7 +205,7 @@ async def forecast_accuracy(
         (
             await session.execute(
                 text(
-                    f"{ACCURACY_SUMMARY}{_where(clauses)} group by horizon, is_backfill order by horizon, is_backfill"
+                    ACCURACY_SUMMARY + _where(clauses) + " group by horizon, is_backfill order by horizon, is_backfill"
                 ),
                 params,
             )

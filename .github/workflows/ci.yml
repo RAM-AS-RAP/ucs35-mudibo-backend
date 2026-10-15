@@ -1,0 +1,65 @@
+# Backend CI: lint and the unit/API test suite (no database, no network).
+#
+# This workflow must never use secrets: it has no `secrets.*` references and every environment value
+# below is an obviously fake placeholder that only lets the settings import. Keep it that way. There is
+# no deployment job here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: development
+      JWT_SECRET: ci-fake-jwt-secret-not-a-real-value-0000000000
+      EMAIL_PROVIDER: console
+      MPESA_ENV: sandbox
+      MPESA_BASE_URL: https://sandbox.safaricom.co.ke
+      DATABASE_URL: ""
+      RUN_DB_TESTS: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Tests (no database)
+        run: pytest -q -m "not db"
+
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+
+      - name: Audit runtime requirements
+        run: pip-audit -r requirements.txt

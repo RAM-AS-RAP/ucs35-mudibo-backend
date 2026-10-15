@@ -1,53 +1,210 @@
 # API endpoints
 
-All paths are prefixed with `/api/v1`. Authenticated routes require a bearer access token. `farmer`, `buyer`, and `admin` describe allowed roles; super-admin routes require an admin account with the super-admin flag.
+All paths are prefixed with `/api/v1`. Authenticated routes require a bearer access token. `farmer`, `buyer`, and `admin` describe allowed roles; super-admin routes require an admin account with the super-admin flag. The authoritative list of routes and allowed roles is `tests/route_matrix.py`. A test checks that every route has exactly one `### METHOD /api/v1/path` heading below. The machine-readable contract for the frontend is `docs/openapi.json` (see [frontend_contract.md](frontend_contract.md)).
 
-| Method | Path | Allowed roles | Request | Response |
-| --- | --- | --- | --- | --- |
-| GET | `/health` | Public | None | API health status. |
-| POST | `/auth/register/farmer` | Public | Name, phone, optional email, password. | Created farmer account. |
-| POST | `/auth/register/buyer` | Public | Name, phone, optional email, password. | Created buyer account. |
-| POST | `/auth/login` | Public | Phone/email identifier and password. | Bearer token, role, forced-password-change flag. |
-| POST | `/auth/change-password` | Any authenticated user | Current and new password. | 200 with a note that the user must log in again; earlier tokens are revoked. |
-| GET | `/auth/me` | Any authenticated user | None | Current account. |
-| POST | `/auth/accept-invite` | Public | JSON `email`, `code`, `password`. | 201 `UserOut` of the new admin. |
-| POST | `/auth/invite/request-code` | Public | JSON `email`. | Always 202 with the same body. |
-| POST | `/auth/password-reset/request` | Public | JSON `email`. | Always 202 with the same body. |
-| POST | `/auth/password-reset/confirm` | Public | JSON `email`, `code`, `new_password`. | 204. |
-| GET | `/markets` | Farmer, admin | None | Markets with price data, with each market's latest observed month. |
-| GET | `/prices/current` | Farmer, admin | `crop=maize` or `crop=beans`. | `{items, as_of_note}`; each item has current price/source/fetched time and the immediately previous calendar-month price/change, null when missing. Empty items if that crop has no data. |
-| GET | `/prices/trends` | Farmer, admin | Available `market`, `crop`, `months` (1-60, default 24). | Last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market. |
-| GET | `/forecasts` | Farmer, admin | Available `market`, `crop`, `horizon=one_month` or `two_month`. | Stored forecast with `expected_change_pct`, unchanged SHAP values, `based_on`, and `for_month`; 404 if absent or stale. |
-| POST | `/listings` | Farmer | Multipart crop, market, quantity, `unit=kg`, price, optional JPEG/PNG image. | Created `ListingOut` (201). Errors: `market_not_available` (404), `listing_limit_reached` (409), `invalid_image` (422), `image_too_large` (413). |
-| GET | `/listings/mine` | Farmer | Optional `status`, `limit` (1-100, default 20), `offset`. | Own listings, newest first; removed listings are included by default. |
-| PATCH | `/listings/{id}` | Owning farmer | Multipart optional quantity, price, image replacement, or `remove_image`. | Updated `ListingOut`. Errors: `listing_not_found` (404), `listing_removed` (409), `no_changes` (422). |
-| DELETE | `/listings/{id}` | Owning farmer | Listing UUID. | Soft-remove with 204; repeat delete is idempotent. `listing_has_pending_orders` returns 409. |
-| GET | `/listings/mine/orders` | Farmer | Optional order `status`, `listing_id`, `limit` (1-100, default 20), `offset`. | Paginated own-listing orders with latest payment metadata, buyer name only, and a sandbox/delivery note. |
-| GET | `/listings` | Buyer | Optional `crop`, `market`, `min_price`, `max_price`, `sort`, `limit`, `offset`. | Paginated active listings with stock (`PublicListingOut`). |
-| GET | `/listings/{id}` | Buyer | Listing UUID. | Active or sold-out listing with `available`; removed or unknown is 404. |
-| POST | `/orders` | Buyer | JSON `listing_id` and `quantity`. | Created `OrderOut` (201) with stock reserved and a server-calculated total. |
-| GET | `/orders/mine` | Buyer | Optional `status`, `limit`, `offset`. | Own orders, newest first, with listing and payment summaries. |
-| GET | `/orders/{id}` | Owning buyer, or admin (read only) | Order UUID. | `OrderOut`. |
-| POST | `/orders/{id}/cancel` | Owning buyer | Order UUID. | Cancelled `OrderOut`; stock is returned to the listing. |
-| POST | `/orders/{id}/pay` | Owning buyer | `Idempotency-Key` header, empty body. | 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent. |
-| POST | `/payments/callback/{token}` | Daraja only (no authentication) | Daraja STK callback JSON. | 404 with an empty body for a wrong token; otherwise always 200 `{"ResultCode": 0, "ResultDesc": "Accepted"}`. |
-| POST | `/admin/invites` | Super admin | JSON `name`, `phone_number`, `email`. | 201 invite summary; the code is emailed, never returned. |
-| POST | `/admin/invites/{id}/resend` | Super admin | Empty body. | Invite summary; a new code is emailed. |
-| GET | `/admin/invites` | Super admin | Optional `status`, `limit`, `offset`. | Paginated invites. |
-| DELETE | `/admin/invites/{id}` | Super admin | Invite UUID. | 204; revokes a pending invite. |
-| POST | `/admin/email/test` | Super admin | Empty body. | `{"email_sent": true}` or 502 `email_failed` with a `category`. |
-| GET | `/admin/users` | Admin | Optional `role`, `is_disabled`, `q`, `limit`, `offset`. | Paginated `UserAdminOut`, newest first. |
-| PATCH | `/admin/users/{id}/disable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
-| PATCH | `/admin/users/{id}/enable` | Admin (super admin for admin targets) | Empty body. | `UserAdminOut`; idempotent. |
-| GET | `/admin/listings` | Admin | Optional `status`, `crop`, `market`, `farmer_id`, `q`, `limit`, `offset`. | Paginated `AdminListingOut`. |
-| DELETE | `/admin/listings/{id}` | Admin | Listing UUID. | 204; soft removal that cancels unpaid orders. |
-| GET | `/admin/orders` | Admin | Optional `status`, `q`, `limit`, `offset`. | Paginated `AdminOrderOut`. |
-| GET | `/admin/orders/{id}` | Admin | Order UUID. | `AdminOrderOut` with `payments` and `resolution`. |
-| POST | `/admin/orders/{id}/resolve` | Admin | JSON `action`, `note`. | Resolved order. |
-| GET | `/admin/payments` | Admin | Optional `status`, `order_reference`, `environment`, `created_from`, `created_to`, `limit`, `offset`. | Paginated `AdminPaymentOut`. |
-| GET | `/admin/payments/{id}/events` | Admin | Payment UUID. | Event timeline, oldest first, at most 100. |
-| GET | `/admin/stats` | Admin | None | `StatsOut` dashboard counts and pipeline status. |
-| GET | `/admin/forecast-accuracy` | Admin | Optional `market`, `crop`, `horizon`, `is_backfill`, `include_pending`, `limit`, `offset`. | `AccuracyOut` rows and summary. |
+Every response carries `X-Request-ID` (a UUID; a valid UUID sent by the client is reused) and `Cache-Control: no-store`. Every error body is `{"error": {"code", "message", "request_id"}}`, sometimes with `reason` or other documented fields. These errors can come from any route: 401 `invalid_credentials`, 403 `forbidden` or `password_change_required`, 404 `not_found` (unknown route), 405 `method_not_allowed`, 413 `payload_too_large` (JSON or form bodies above `MAX_JSON_BODY_BYTES`, multipart listing bodies above `MAX_IMAGE_BYTES` + 64 KiB), 422 `validation_error`, 429 `rate_limited` (with `Retry-After`), 500 `internal_error` (generic message only), 503 `service_unavailable` (`Retry-After: 5`, database unreachable) or `busy` (`Retry-After: 1`, lock timeout, deadlock or serialization failure).
+
+## Endpoint reference
+
+### GET /api/v1/health
+
+Public. No database access. Returns `{"status": "ok"}`.
+
+### GET /api/v1/health/db
+
+Public. Runs `select 1`. Returns `{"status": "ok"}`, or 503 `{"status": "degraded"}` without details.
+
+### POST /api/v1/auth/register/farmer
+
+Public. Name, phone, optional email, password. Unknown fields such as `role` are rejected with 422. Returns 201 with the created farmer account. See [Authentication details](#authentication-details).
+
+### POST /api/v1/auth/register/buyer
+
+Public. Same body as farmer registration. Returns 201 with the created buyer account.
+
+### POST /api/v1/auth/login
+
+Public. Phone/email `identifier` and `password`. Returns the bearer token, `expires_in`, `role` and `must_change_password`.
+
+### POST /api/v1/auth/change-password
+
+Any authenticated user, also while a password change is required. Current and new password. Returns 200 with a note that the user must log in again; earlier tokens are revoked.
+
+### GET /api/v1/auth/me
+
+Any authenticated user. Returns the current account.
+
+### POST /api/v1/auth/accept-invite
+
+Public. JSON `email`, `code`, `password`. Returns 201 `UserOut` of the new admin. See [Invites and password reset](#invites-and-password-reset).
+
+### POST /api/v1/auth/invite/request-code
+
+Public. JSON `email`. Always returns 202 with the same body.
+
+### POST /api/v1/auth/password-reset/request
+
+Public. JSON `email`. Always returns 202 with the same body.
+
+### POST /api/v1/auth/password-reset/confirm
+
+Public. JSON `email`, `code`, `new_password`. Returns 204.
+
+### GET /api/v1/markets
+
+Farmer, admin. Markets with price data, with each market's latest observed month.
+
+### GET /api/v1/prices/current
+
+Farmer, admin. `crop=maize` or `crop=beans`. Returns `{items, as_of_note}`. Each item has the current price, source and fetched time, plus the previous calendar month's price and change (null when missing). `items` is empty if the crop has no data.
+
+### GET /api/v1/prices/trends
+
+Farmer, admin. Available `market`, `crop`, `months` (1-60, default 24). Returns the last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market.
+
+### GET /api/v1/forecasts
+
+Farmer, admin. Available `market`, `crop`, `horizon=one_month` or `two_month`. Returns the stored forecast with `expected_change_pct`, unchanged SHAP values, `based_on`, and `for_month`; 404 if absent or stale.
+
+### POST /api/v1/listings
+
+Farmer. Multipart crop, market, quantity, `unit=kg`, price, optional JPEG/PNG image. Returns the created `ListingOut` (201). Errors: `market_not_available` (404), `listing_limit_reached` (409), `invalid_image` (422), `image_too_large` (413).
+
+### GET /api/v1/listings/mine
+
+Farmer. Optional `status`, `limit` (1-100, default 20), `offset`. Own listings, newest first; removed listings are included by default.
+
+### GET /api/v1/listings/mine/orders
+
+Farmer. Optional order `status`, `listing_id`, `limit` (1-100, default 20), `offset`. Paginated orders on the farmer's own listings, with latest payment metadata, the buyer's name only, and a sandbox/delivery note.
+
+### PATCH /api/v1/listings/{listing_id}
+
+Owning farmer. Multipart optional quantity, price, image replacement, or `remove_image`. Returns the updated `ListingOut`. Errors: `listing_not_found` (404), `listing_removed` (409), `no_changes` (422).
+
+### DELETE /api/v1/listings/{listing_id}
+
+Owning farmer. Soft-removes the listing and returns 204; a repeat delete is idempotent. `listing_has_pending_orders` returns 409.
+
+### GET /api/v1/listings
+
+Buyer. Optional `crop`, `market`, `min_price`, `max_price`, `sort`, `limit`, `offset`. Paginated active listings with stock (`PublicListingOut`). See [Buyer marketplace API](#buyer-marketplace-api).
+
+### GET /api/v1/listings/{listing_id}
+
+Buyer. An active or sold-out listing with `available`; a removed or unknown listing is 404.
+
+### POST /api/v1/orders
+
+Buyer. JSON `listing_id` and `quantity`. Returns the created `OrderOut` (201) with stock reserved and a server-calculated total.
+
+### GET /api/v1/orders/mine
+
+Buyer. Optional `status`, `limit`, `offset`. Own orders, newest first, with listing and payment summaries.
+
+### GET /api/v1/orders/{order_id}
+
+Owning buyer, or admin (read only). Returns `OrderOut`.
+
+### POST /api/v1/orders/{order_id}/cancel
+
+Owning buyer. Returns the cancelled `OrderOut`; stock is returned to the listing.
+
+### POST /api/v1/orders/{order_id}/pay
+
+Owning buyer. `Idempotency-Key` header, empty body. Returns 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent.
+
+### POST /api/v1/payments/callback/{token}
+
+Daraja only. There is no bearer authentication: the secret path token is the check. Body: Daraja STK callback JSON. A wrong token gets 404 with an empty body; otherwise the response is always 200 `{"ResultCode": 0, "ResultDesc": "Accepted"}`. This route has its own body limit (`CALLBACK_MAX_BYTES`, 413 with an empty body) and is not in the OpenAPI schema.
+
+### POST /api/v1/admin/invites
+
+Super admin. JSON `name`, `phone_number`, `email`. Returns a 201 invite summary; the code is emailed, never returned.
+
+### POST /api/v1/admin/invites/{invite_id}/resend
+
+Super admin. Empty body. Returns the invite summary; a new code is emailed.
+
+### GET /api/v1/admin/invites
+
+Super admin. Optional `status`, `limit`, `offset`. Paginated invites.
+
+### DELETE /api/v1/admin/invites/{invite_id}
+
+Super admin. Revokes a pending invite and returns 204.
+
+### POST /api/v1/admin/email/test
+
+Super admin. Empty body. Returns `{"email_sent": true}`, or 502 `email_failed` with a `category`.
+
+### GET /api/v1/admin/users
+
+Admin. Optional `role`, `is_disabled`, `q`, `limit`, `offset`. Paginated `UserAdminOut`, newest first.
+
+### PATCH /api/v1/admin/users/{user_id}/disable
+
+Admin (super admin for admin targets). Empty body. Returns `UserAdminOut`; idempotent.
+
+### PATCH /api/v1/admin/users/{user_id}/enable
+
+Admin (super admin for admin targets). Empty body. Returns `UserAdminOut`; idempotent.
+
+### GET /api/v1/admin/listings
+
+Admin. Optional `status`, `crop`, `market`, `farmer_id`, `q`, `limit`, `offset`. Paginated `AdminListingOut`.
+
+### DELETE /api/v1/admin/listings/{listing_id}
+
+Admin. Soft removal that cancels unpaid orders; returns 204.
+
+### GET /api/v1/admin/orders
+
+Admin. Optional `status`, `q`, `limit`, `offset`. Paginated `AdminOrderOut`.
+
+### GET /api/v1/admin/orders/{order_id}
+
+Admin. `AdminOrderOut` with `payments` and `resolution`.
+
+### POST /api/v1/admin/orders/{order_id}/resolve
+
+Admin. JSON `action`, `note`. Returns the resolved order.
+
+### GET /api/v1/admin/payments
+
+Admin. Optional `status`, `order_reference`, `environment`, `created_from`, `created_to`, `limit`, `offset`. Paginated `AdminPaymentOut`.
+
+### GET /api/v1/admin/payments/{payment_id}/events
+
+Admin. Event timeline, oldest first, at most 100.
+
+### GET /api/v1/admin/stats
+
+Admin. `StatsOut` dashboard counts and pipeline status.
+
+### GET /api/v1/admin/forecast-accuracy
+
+Admin. Optional `market`, `crop`, `horizon`, `is_backfill`, `include_pending`, `limit`, `offset`. `AccuracyOut` rows and summary.
+
+### GET /docs
+
+Public, development only (disabled when `APP_ENV=production`). Swagger UI. The docs pages do not get the strict `Content-Security-Policy`.
+
+### GET /docs/oauth2-redirect
+
+Public, development only. Swagger UI helper page.
+
+### GET /redoc
+
+Public, development only. ReDoc reference.
+
+### GET /openapi.json
+
+Public, development only. The live OpenAPI schema; the committed copy is `docs/openapi.json`.
+
+## Overview
+
+Error examples in the rest of this document leave out `request_id` for brevity; real error bodies always include it.
 
 Admin routes are described in [Admin API](#admin-api) and operated with [admin.md](admin.md). Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
 
@@ -69,7 +226,7 @@ All protected routes return `401` when unauthenticated and `403 forbidden` when 
 | `DELETE /listings/{id}` | 204 | 404 `listing_not_found`; 409 `listing_has_pending_orders`. Deleting an already removed listing also returns 204. |
 | `GET /listings/mine/orders` | 200 | 422 `validation_error` for invalid filters or pagination. |
 
-Errors use `{"error":{"code":"...","message":"..."}}`; forecast errors may also include `reason`.
+Errors use `{"error":{"code":"...","message":"...","request_id":"..."}}`; forecast errors may also include `reason`.
 
 `POST /listings` enforces the active-listing limit and returns `listing_limit_reached` (409), `invalid_image` (422), or `image_too_large` (413) when applicable. Listing edits/removals enforce ownership; both a missing listing and another farmer's listing return the same `listing_not_found` (404). Other listing errors are `listing_removed` (409), `listing_has_pending_orders` (409), and `no_changes` (422).
 
@@ -204,7 +361,7 @@ Stock is reserved at checkout: the ordered quantity is removed from the listing 
 
 All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
 
-### `GET /listings`
+#### Details: `GET /listings`
 
 Query parameters: `crop` (`maize` or `beans`), `market` (must exist in `market_locations`, case-insensitive), `min_price` and `max_price` (non-negative decimals, `min_price <= max_price`), `sort` (`newest` default, `price_asc`, `price_desc`; ties are broken by id), `limit` (1-100, default 20), `offset`. Only `active` listings with `quantity_available > 0` are returned.
 
@@ -232,11 +389,11 @@ Query parameters: `crop` (`maize` or `beans`), `market` (must exist in `market_l
 
 Listings show the seller's name only, never the farmer's id, phone number, or email.
 
-### `GET /listings/{id}`
+#### Details: `GET /listings/{id}`
 
 Returns the same fields plus `available` (true when the listing is active and has stock). A `sold_out` listing is returned with `available: false`.
 
-### `POST /orders`
+#### Details: `POST /orders`
 
 Body (unknown fields are rejected with 422):
 
@@ -286,15 +443,15 @@ Body (unknown fields are rejected with 422):
 - `can_pay` is true only for the owning buyer, when the order is `pending_payment`, not expired, has at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds left on the database clock, has no open (`initiating` or `initiated`) payment, and has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) payment rows. `can_cancel` is true for the owning buyer when the order is `pending_payment` with no open payment. Both are false for an admin.
 - When the owning buyer reads `GET /orders/{id}`, the latest payment is reconciled first: a stale `initiating` payment is failed, and an `initiated` payment older than `RECONCILE_AFTER_SECONDS` (or a `timeout` payment younger than `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES`) is checked with an STK Push Query, at most once every `MPESA_QUERY_MIN_INTERVAL_SECONDS`. A reconciliation failure never fails the request. Admin reads never reconcile.
 
-### `GET /orders/mine`
+#### Details: `GET /orders/mine`
 
 Query parameters: optional `status` (an order status), `limit` (1-100, default 20), `offset`. Returns `{items, total, limit, offset}` of `OrderOut`, newest first.
 
-### `POST /orders/{id}/cancel`
+#### Details: `POST /orders/{id}/cancel`
 
 Cancels the buyer's own `pending_payment` order and returns its quantity to the listing; a `sold_out` listing becomes `active` again (a removed listing gets its quantity back but stays removed). Cancelling an already cancelled order returns 200 with the current order.
 
-### `POST /orders/{id}/pay`
+#### Details: `POST /orders/{id}/pay`
 
 Sends an M-Pesa STK Push prompt for the order through the Safaricom Daraja **sandbox** (shortcode 174379). No real money moves; a `paid` order is a simulated confirmation.
 
@@ -345,7 +502,7 @@ Errors:
 | 502 | `payment_request_failed` | Daraja rejected the request or did not answer in time ("Could not start the M-Pesa prompt. Please try again."). After a timeout the prompt may still have arrived, so a duplicate prompt is possible in the sandbox. |
 | 503 | `payments_unavailable` | Payment settings are missing or `MPESA_CALLBACK_BASE_URL` is not HTTPS. |
 
-### `POST /payments/callback/{token}`
+#### Details: `POST /payments/callback/{token}`
 
 Called by Daraja only, never by the PWA. There is no bearer authentication: the secret `MPESA_CALLBACK_TOKEN` in the path is the check, and a wrong token returns 404 with an empty body. Bodies over `CALLBACK_MAX_BYTES` (default 16384) return 413. After a valid token the endpoint always returns 200 with `{"ResultCode": 0, "ResultDesc": "Accepted"}`, also for malformed, unknown, duplicate or mismatched callbacks, so Daraja never retries. Every callback is stored as a payment event first. The phone number in the callback is ignored. There is no rate limit on this route. The server access log shows the path as `/api/v1/payments/callback/***`.
 
