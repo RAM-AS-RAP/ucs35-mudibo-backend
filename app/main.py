@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse, Response
 from app.core.config import get_settings
 from app.core.errors import error_body, install_error_handlers
 from app.db import get_engine
+from app.integrations import email as email_integration
 from app.integrations.daraja import DarajaClient, DarajaConfigError, redact_callback_url
 from app.routers import admin, auth, forecasts, listings, markets, orders, payments, prices
 
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     docs_enabled = settings.app_env != "production"
     install_access_log_filter()
+    email_integration.log_startup_warnings(settings)
     application = FastAPI(
         title="AgriSence Backend API",
         version="1.0.0",

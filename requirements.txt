@@ -12,3 +12,4 @@ python-multipart==0.0.32
 slowapi==0.1.10
 Pillow
 tzdata
+aiosmtplib
