@@ -137,7 +137,7 @@ async def create_invite(session: AsyncSession, actor: User, body: CreateInviteRe
         ),
         params,
     )
-    pending = await session.scalar(text(f"select count(*) from public.admin_invites where {PENDING_CONDITION}"))
+    pending = await session.scalar(text("select count(*) from public.admin_invites where " + PENDING_CONDITION))
     if int(pending or 0) >= settings.invite_max_pending:
         await session.rollback()
         raise AppError(

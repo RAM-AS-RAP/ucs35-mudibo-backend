@@ -185,7 +185,7 @@ async def list_orders(
     rows = (
         (
             await session.execute(
-                text(f"{ORDER_SELECT}{where} order by o.created_at desc, o.id desc limit :limit offset :offset"),
+                text(ORDER_SELECT + where + " order by o.created_at desc, o.id desc limit :limit offset :offset"),
                 {**params, "limit": pagination.limit, "offset": pagination.offset},
             )
         )
@@ -216,7 +216,7 @@ def _payment_out(payment: Payment) -> AdminOrderPaymentOut:
 async def get_order(session: AsyncSession, order_id: UUID) -> AdminOrderDetail:
     """One order with all its payments (oldest first) and the latest resolution, if any."""
     row = (
-        (await session.execute(text(f"{ORDER_SELECT} where o.id = cast(:order_id as uuid)"), {"order_id": order_id}))
+        (await session.execute(text(ORDER_SELECT + " where o.id = cast(:order_id as uuid)"), {"order_id": order_id}))
         .mappings()
         .first()
     )
@@ -406,7 +406,7 @@ async def list_payments(
     rows = (
         (
             await session.execute(
-                text(f"{PAYMENT_SELECT}{where} order by p.created_at desc, p.id desc limit :limit offset :offset"),
+                text(PAYMENT_SELECT + where + " order by p.created_at desc, p.id desc limit :limit offset :offset"),
                 {**params, "limit": pagination.limit, "offset": pagination.offset},
             )
         )

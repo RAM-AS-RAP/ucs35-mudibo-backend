@@ -238,6 +238,7 @@ def _rounded(value: Decimal | None, places: Decimal) -> object:
     """JSON number rounded half up; computed in Decimal and converted only for serialization."""
     if value is None:
         return None
+    # float-ok: display serializer; money stays Decimal and becomes a JSON number only here.
     return float(value.quantize(places, rounding=ROUND_HALF_UP))
 
 

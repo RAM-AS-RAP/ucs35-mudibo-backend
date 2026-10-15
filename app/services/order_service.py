@@ -211,6 +211,32 @@ ORDER_VIEW_JOINS = """
     ) as payment_counts
 """
 
+# Composed once from the constant fragments above; values are always bound parameters.
+ORDER_VIEW_BY_ID_SQL = (
+    "select " + ORDER_VIEW_COLUMNS + " " + ORDER_VIEW_JOINS + " where o.id = cast(:order_id as uuid)"
+)
+
+MY_ORDERS_SQL = (
+    """
+            with filtered as (
+                select """
+    + ORDER_VIEW_COLUMNS
+    + " "
+    + ORDER_VIEW_JOINS
+    + """
+                where o.buyer_id = cast(:buyer_id as uuid)
+                  and (cast(:status as public.order_status) is null or o.status = cast(:status as public.order_status))
+            ), page as (
+                select * from filtered order by created_at desc, id desc limit :limit offset :offset
+            ), totals as (
+                select count(*) as total from filtered
+            )
+            select page.*, totals.total
+            from totals left join page on true
+            order by page.created_at desc, page.id desc
+        """
+)
+
 
 def _order_out(row: Any, viewer: User) -> OrderOut:
     """Build the order view, deriving expiry and permitted actions from database values."""
@@ -270,7 +296,7 @@ def _order_out(row: Any, viewer: User) -> OrderOut:
 async def _fetch_order_view(session: AsyncSession, order_id: UUID, viewer: User) -> OrderOut:
     """Load one order with its listing, seller name, payment summary, and database time."""
     result = await session.execute(
-        text(f"select {ORDER_VIEW_COLUMNS} {ORDER_VIEW_JOINS} where o.id = cast(:order_id as uuid)"),
+        text(ORDER_VIEW_BY_ID_SQL),
         {"order_id": order_id},
     )
     row = result.mappings().first()
@@ -287,20 +313,7 @@ async def list_my_orders(
 ) -> OrderPage:
     """Return the buyer's own orders, newest first, with summaries from one joined query."""
     result = await session.execute(
-        text(f"""
-            with filtered as (
-                select {ORDER_VIEW_COLUMNS} {ORDER_VIEW_JOINS}
-                where o.buyer_id = cast(:buyer_id as uuid)
-                  and (cast(:status as public.order_status) is null or o.status = cast(:status as public.order_status))
-            ), page as (
-                select * from filtered order by created_at desc, id desc limit :limit offset :offset
-            ), totals as (
-                select count(*) as total from filtered
-            )
-            select page.*, totals.total
-            from totals left join page on true
-            order by page.created_at desc, page.id desc
-        """),
+        text(MY_ORDERS_SQL),
         {
             "buyer_id": buyer.id,
             "status": status_filter.value if status_filter is not None else None,
