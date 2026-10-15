@@ -1,6 +1,8 @@
-# AgriSence Backend API
-
-FastAPI backend for a SHAP-explainable crop-price decision support and farmer-buyer marketplace platform for smallholder farmers in Kenya. Forecasts and observed prices are read from PostgreSQL; the monthly ML pipeline is maintained separately.
+# ucs35-mudibo-backend
+## Project Title: SHAP-based explainable decision support system for crop price prediction and farmer-buyer linkage among smallholder farmers in Kenya
+### Name: Sean Mudibo
+### Adm No: 168329
+### Capstone Project (Webmasters Kenya)
 
 - ML repository: https://github.com/RAM-AS-RAP/ucs35-mudibo-ml
 - React PWA repository: https://github.com/RAM-AS-RAP/ucs35-mudibo-frontend
