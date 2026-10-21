@@ -22,6 +22,7 @@ from app.models.order import Order
 from app.models.user import User
 from app.schemas.common import Pagination
 from app.schemas.listing import (
+    BuyerMarketOut,
     ListingBrowseFilters,
     ListingOut,
     ListingPage,
@@ -252,6 +253,31 @@ async def get_public_listing(session: AsyncSession, listing_id: UUID) -> PublicL
     # The query above already excluded disabled farmers.
     available = listing_is_buyer_visible(listing, farmer_disabled=False)
     return PublicListingDetail(**_public_listing_values(listing, seller_name), available=available)
+
+
+async def buyer_markets(session: AsyncSession) -> list[BuyerMarketOut]:
+    """Markets with at least one buyer-visible listing and their counts, by name, in one grouped query.
+
+    Uses the same visibility rule as ``browse_listings``; nothing comes from ``market_prices``.
+    """
+    result = await session.execute(
+        select(ProduceListing.market, func.count(ProduceListing.id))
+        .join(User, User.id == ProduceListing.farmer_id)
+        .where(buyer_visible_listings_clause())
+        .group_by(ProduceListing.market)
+        .order_by(ProduceListing.market.asc())
+    )
+    return [BuyerMarketOut(name=market, listing_count=int(count)) for market, count in result.all()]
+
+
+async def get_owned_listing(session: AsyncSession, farmer: User, listing_id: UUID) -> ListingOut:
+    """Return one of this farmer's listings in any status; a missing or foreign id is the same 404."""
+    listing = await session.scalar(
+        select(ProduceListing).where(ProduceListing.id == listing_id, ProduceListing.farmer_id == farmer.id)
+    )
+    if listing is None:
+        raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
+    return _listing_out(listing)
 
 
 async def my_listings(
