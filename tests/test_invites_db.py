@@ -114,6 +114,7 @@ async def test_full_invite_flow_creates_an_admin_who_logs_in(db_session: AsyncSe
         select(User).where(User.id == user["id"]).execution_options(populate_existing=True)
     )
     assert (created.role, created.is_super_admin, created.must_change_password) == (UserRole.ADMIN, False, False)
+    assert user["is_super_admin"] is False
     assert created.created_by == inviter.id and created.password_changed_at is not None
     assert verify_password(created.password_hash, PASSWORD)
     assert (await invite_row(db_session, out.id))["used_at"] is not None
@@ -121,6 +122,7 @@ async def test_full_invite_flow_creates_an_admin_who_logs_in(db_session: AsyncSe
     auth_service.get_login_throttle().reset()
     login = await auth_service.login(db_session, request.email, PASSWORD)
     assert login["must_change_password"] is False
+    assert login["is_super_admin"] is False
     await expect_generic_failure(invite_service.accept_invite(db_session, accept(request.email, code)))
 
 

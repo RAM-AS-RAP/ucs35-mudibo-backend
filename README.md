@@ -440,6 +440,8 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest -q -m "not db"` 
 
 Authentication, health checks, market/price/forecast reads, farmer-owned listing creation/edit/removal, farmer listing/order history, buyer listing browse/detail, checkout with stock reservation, buyer order history/detail/cancel, and M-Pesa sandbox payments (pay endpoint, callback, and reconciliation; see `docs/payments.md`) and the admin APIs (admin invitations by emailed code, users, listing moderation, order and payment review, reconciliation, statistics and forecast accuracy; see `docs/admin.md`) have service implementations. Forecast and price data must be populated by the separate ML pipeline or configured FEWS import before they return useful results. Only markets with price observations are offered (currently Nairobi and Kisumu).
 
+Frontend support additions: `GET /api/v1/listings/mine/{listing_id}` (farmer reads one own listing in any status, for the edit screen), `GET /api/v1/listings/markets` (buyer browse market filter: markets with buyer-visible listings and their counts, no price data), and `is_super_admin` in the login response and the user profile (`GET /auth/me`, registration, accept-invite), read from the database and never put in the token. These change the API schema, so `docs/openapi.json` must be re-exported with `python scripts/export_openapi.py` (until then `tests/test_openapi_snapshot.py` fails).
+
 ## Production start
 
 Run behind a trusted reverse proxy that sets `X-Forwarded-For`. Restrict `--forwarded-allow-ips` to trusted proxy addresses in deployments where they are known; `*` trusts all sources and should only be used when the app is not directly reachable by untrusted clients.

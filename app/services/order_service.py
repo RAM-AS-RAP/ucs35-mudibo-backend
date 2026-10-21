@@ -86,7 +86,8 @@ async def create_order(session: AsyncSession, buyer: User, listing_id: UUID, qua
     )
     if listing is None or listing.status == ListingStatus.REMOVED:
         raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
-    if listing.status != ListingStatus.ACTIVE:
+    # Same buyer visibility rule as browse; the query above already excluded disabled farmers.
+    if not listing_service.listing_is_buyer_visible(listing, farmer_disabled=False):
         raise AppError(status.HTTP_409_CONFLICT, "listing_unavailable", "Listing is not available for ordering.")
     if listing.quantity_available < quantity:
         raise AppError(

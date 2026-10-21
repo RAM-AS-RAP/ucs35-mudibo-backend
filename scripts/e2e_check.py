@@ -273,11 +273,15 @@ class E2ERun:
         body = {"name": actor.name, "phone_number": actor.phone, "password": actor.password}
         created = expect(await self.api("POST", f"/auth/register/{route}", json=body), 201)
         actor.id = created["id"]
+        if created.get("is_super_admin") is not False:
+            raise StepFailed("the registration response does not say is_super_admin false")
         login = expect(
             await self.api("POST", "/auth/login", json={"identifier": actor.phone, "password": actor.password}), 200
         )
         if login["role"] != route:
             raise StepFailed(f"login role is not {route}")
+        if login.get("is_super_admin") is not False:
+            raise StepFailed("the login response does not say is_super_admin false")
         actor.token = login["access_token"]
 
     async def farmer_journey(self) -> None:
@@ -386,6 +390,23 @@ class E2ERun:
             expect(await self.api("DELETE", f"/listings/{image['id']}", farmer), 204)
             return f"2 listings in {market} at {price}/kg, image served, edit and delete ok"
 
+        async def read_own_listing() -> str:
+            if self.listing is None:
+                raise StepSkipped("no e2e listing (see the listings step)")
+            listing_id = self.listing["id"]
+            single = expect(await self.api("GET", f"/listings/mine/{listing_id}", farmer), 200)
+            mine = expect(await self.api("GET", "/listings/mine", farmer, params={"limit": 100}), 200)
+            item = next((entry for entry in mine["items"] if entry["id"] == listing_id), None)
+            if item is None or single != item:
+                raise StepFailed("GET /listings/mine/{id} differs from the /listings/mine item")
+            removed = [entry for entry in mine["items"] if entry["status"] == "removed"]
+            if removed:
+                body = expect(await self.api("GET", f"/listings/mine/{removed[0]['id']}", farmer), 200)
+                if body["status"] != "removed":
+                    raise StepFailed("a removed listing is not returned as removed")
+            expect(await self.api("GET", f"/listings/mine/{uuid4()}", farmer), 404, "listing_not_found")
+            return "own listing read (active and removed), unknown id 404"
+
         async def farmer_forbidden() -> str:
             expect(await self.api("GET", "/listings", farmer), 403, "forbidden")
             expect(await self.api("POST", "/orders", farmer, json={}), 403, "forbidden")
@@ -399,6 +420,7 @@ class E2ERun:
             await self.step("farmer", "trends", trends)
             await self.step("farmer", "forecasts", forecasts)
             await self.step("farmer", "listings", create_listings)
+            await self.step("farmer", "read own listing", read_own_listing)
             await self.step("farmer", "buyer routes forbidden", farmer_forbidden)
 
     # 3. Buyer ---------------------------------------------------------------------------------
@@ -435,6 +457,24 @@ class E2ERun:
                 raise StepFailed("the e2e listing is not available")
             return f"{body['total']} listings match"
 
+        async def browse_markets() -> str:
+            listing = need_listing()
+            markets = expect(await self.api("GET", "/listings/markets", buyer), 200)
+            names = [item["name"] for item in markets]
+            if names != sorted(names):
+                raise StepFailed("/listings/markets is not ordered by name")
+            if any(set(item) != {"name", "listing_count"} for item in markets):
+                raise StepFailed("/listings/markets returns fields other than name and listing_count")
+            entry = next((item for item in markets if item["name"] == listing["market"]), None)
+            if entry is None or entry["listing_count"] < 1:
+                raise StepFailed("the e2e listing's market is not in /listings/markets")
+            filtered = expect(
+                await self.api("GET", "/listings", buyer, params={"market": listing["market"], "limit": 1}), 200
+            )
+            if filtered["total"] != entry["listing_count"]:
+                raise StepFailed("listing_count differs from the browse total for that market")
+            return f"{len(markets)} markets; {listing['market']} has {entry['listing_count']} listings"
+
         async def orders() -> str:
             listing = need_listing()
             quantity = Decimal("2")
@@ -465,6 +505,7 @@ class E2ERun:
         if await self.step("buyer", "register and login", register):
             await self.step("buyer", "prices and forecasts forbidden", buyer_forbidden)
             await self.step("buyer", "browse and detail", browse)
+            await self.step("buyer", "markets filter", browse_markets)
             await self.step("buyer", "orders", orders)
 
     # 4. Payments ------------------------------------------------------------------------------
@@ -572,9 +613,13 @@ class E2ERun:
             )
             if body["role"] != "admin":
                 raise StepFailed("E2E_ADMIN_IDENTIFIER is not an admin")
+            if body.get("is_super_admin") is not True:
+                raise StepFailed("the super admin's login response does not say is_super_admin true")
             admin.token = body["access_token"]
             me = expect(await self.api("GET", "/auth/me", admin), 200)
             admin.id = me["id"]
+            if me.get("is_super_admin") is not True:
+                raise StepFailed("/auth/me for the super admin does not say is_super_admin true")
             if body["must_change_password"]:
                 raise StepSkipped("the super admin must change the password first; admin routes answer 403")
             self.admin_ready = True
@@ -654,10 +699,14 @@ class E2ERun:
         accept = {"email": invited.email, "code": match.group(0).lower(), "password": invited.password}
         user = expect(await self.api("POST", "/auth/accept-invite", json=accept), 201)
         invited.id = user["id"]
+        if user.get("is_super_admin") is not False:
+            raise StepFailed("the accept-invite response does not say is_super_admin false")
         login = expect(
             await self.api("POST", "/auth/login", json={"identifier": invited.email, "password": invited.password}),
             200,
         )
+        if login.get("is_super_admin") is not False:
+            raise StepFailed("an invited admin logged in with is_super_admin true")
         invited.token = login["access_token"]
         expect(await self.api("GET", "/admin/stats", invited), 200)
         first = await self.api("POST", "/auth/accept-invite", json=accept)

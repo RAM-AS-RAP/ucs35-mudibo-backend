@@ -14,5 +14,7 @@ class UserOut(BaseModel):
     phone_number: str
     email: EmailStr | None
     role: str
+    # Always read from the users row (false for everyone but the super admin); never from the token.
+    is_super_admin: bool
     must_change_password: bool
     created_at: datetime

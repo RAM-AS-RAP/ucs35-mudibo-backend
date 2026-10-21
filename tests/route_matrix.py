@@ -53,6 +53,8 @@ API_ROUTES: dict[tuple[str, str], Access] = {
     ("POST", "/api/v1/listings"): FARMER,
     ("GET", "/api/v1/listings/mine"): FARMER,
     ("GET", "/api/v1/listings/mine/orders"): FARMER,
+    ("GET", "/api/v1/listings/mine/{listing_id}"): FARMER,  # own listing in any status, edit screen
+    ("GET", "/api/v1/listings/markets"): BUYER,  # markets with buyer-visible listings, no price data
     ("GET", "/api/v1/listings"): BUYER,
     ("GET", "/api/v1/listings/{listing_id}"): BUYER,
     ("PATCH", "/api/v1/listings/{listing_id}"): FARMER,

@@ -1,7 +1,8 @@
 """Farmer-owned listing APIs and buyer listing views.
 
-Roles are enforced per route. Static paths (`/mine`, `/mine/orders`) are declared before the
-dynamic `/{listing_id}` routes, and `listing_id` is typed as UUID, so `mine` is never parsed as an id.
+Roles are enforced per route. Static paths (`/mine`, `/mine/orders`, `/markets`) are declared before the
+dynamic `/{listing_id}` routes, `/mine/{listing_id}` comes after `/mine/orders`, and `listing_id` is typed
+as UUID, so `mine`, `orders` and `markets` are never parsed as an id.
 """
 
 from uuid import UUID
@@ -16,6 +17,7 @@ from app.models.user import User
 from app.routers.auth import limiter
 from app.schemas.common import Pagination, pagination_params
 from app.schemas.listing import (
+    BuyerMarketOut,
     FarmerOrdersPage,
     ListingBrowseFilters,
     ListingOut,
@@ -75,6 +77,23 @@ async def farmer_orders(
     session: AsyncSession = Depends(get_db),
 ) -> FarmerOrdersPage:
     return await order_service.list_orders_for_farmer(session, farmer, pagination, status_filter, listing_id)
+
+
+@router.get("/mine/{listing_id}", response_model=ListingOut)
+async def my_listing(
+    listing_id: UUID,
+    farmer: User = Depends(require_role(UserRole.FARMER)),
+    session: AsyncSession = Depends(get_db),
+) -> ListingOut:
+    return await listing_service.get_owned_listing(session, farmer, listing_id)
+
+
+@router.get("/markets", response_model=list[BuyerMarketOut])
+async def buyer_markets(
+    _: User = Depends(require_role(UserRole.BUYER)),
+    session: AsyncSession = Depends(get_db),
+) -> list[BuyerMarketOut]:
+    return await listing_service.buyer_markets(session)
 
 
 @router.get("", response_model=PublicListingPage)

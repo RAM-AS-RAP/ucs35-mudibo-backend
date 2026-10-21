@@ -83,6 +83,7 @@ async def test_farmer_registration_sets_role_in_route(api_client, application, m
             phone_number=fields["phone_number"],
             email=None,
             role=role,
+            is_super_admin=False,
             must_change_password=False,
             created_at=datetime.now(UTC),
         )
@@ -94,6 +95,7 @@ async def test_farmer_registration_sets_role_in_route(api_client, application, m
     assert response.status_code == 201
     assert called["role"] == UserRole.FARMER
     assert response.json()["role"] == "farmer"
+    assert response.json()["is_super_admin"] is False
 
 
 @pytest.mark.asyncio
@@ -107,6 +109,7 @@ async def test_buyer_registration_sets_role_in_route(api_client, application, mo
             phone_number=data.phone_number,
             email=None,
             role=role,
+            is_super_admin=False,
             must_change_password=False,
             created_at=datetime.now(UTC),
         )
@@ -118,6 +121,7 @@ async def test_buyer_registration_sets_role_in_route(api_client, application, mo
     )
     assert response.status_code == 201
     assert response.json()["role"] == "buyer"
+    assert response.json()["is_super_admin"] is False
 
 
 @pytest.mark.asyncio

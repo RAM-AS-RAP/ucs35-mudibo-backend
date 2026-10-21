@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile, status
-from sqlalchemy import ColumnElement, exists, func, select
+from sqlalchemy import ColumnElement, and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -22,6 +22,7 @@ from app.models.order import Order
 from app.models.user import User
 from app.schemas.common import Pagination
 from app.schemas.listing import (
+    BuyerMarketOut,
     ListingBrowseFilters,
     ListingOut,
     ListingPage,
@@ -178,6 +179,24 @@ def farmer_not_disabled() -> ColumnElement[bool]:
     return ~exists().where(disabled_farmer.id == ProduceListing.farmer_id, disabled_farmer.is_disabled.is_(True))
 
 
+def buyer_visible_listings_clause() -> ColumnElement[bool]:
+    """The one rule for listings a buyer can see and buy: active, in stock, farmer not disabled.
+
+    Used by the browse query and the buyer markets list. ``listing_is_buyer_visible`` is the same rule
+    for a row that is already loaded (listing detail ``available`` and checkout); keep the two together.
+    """
+    return and_(
+        ProduceListing.status == ListingStatus.ACTIVE,
+        ProduceListing.quantity_available > 0,
+        farmer_not_disabled(),
+    )
+
+
+def listing_is_buyer_visible(listing: ProduceListing, *, farmer_disabled: bool) -> bool:
+    """``buyer_visible_listings_clause`` evaluated on a loaded listing and its farmer's disabled flag."""
+    return listing.status == ListingStatus.ACTIVE and listing.quantity_available > 0 and not farmer_disabled
+
+
 _BROWSE_ORDER = {
     ListingSort.NEWEST: (ProduceListing.created_at.desc(), ProduceListing.id.asc()),
     ListingSort.PRICE_ASC: (ProduceListing.price_per_unit.asc(), ProduceListing.id.asc()),
@@ -189,11 +208,7 @@ async def browse_listings(
     session: AsyncSession, filters: ListingBrowseFilters, pagination: Pagination
 ) -> PublicListingPage:
     """Return active listings with stock for buyers, using one count query and one joined page query."""
-    conditions = [
-        ProduceListing.status == ListingStatus.ACTIVE,
-        ProduceListing.quantity_available > 0,
-        farmer_not_disabled(),
-    ]
+    conditions = [buyer_visible_listings_clause()]
     if filters.market is not None:
         conditions.append(ProduceListing.market == await _require_market_location(session, filters.market))
     if filters.crop is not None:
@@ -235,8 +250,34 @@ async def get_public_listing(session: AsyncSession, listing_id: UUID) -> PublicL
     if row is None:
         raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
     listing, seller_name = row
-    available = listing.status == ListingStatus.ACTIVE and listing.quantity_available > 0
+    # The query above already excluded disabled farmers.
+    available = listing_is_buyer_visible(listing, farmer_disabled=False)
     return PublicListingDetail(**_public_listing_values(listing, seller_name), available=available)
+
+
+async def buyer_markets(session: AsyncSession) -> list[BuyerMarketOut]:
+    """Markets with at least one buyer-visible listing and their counts, by name, in one grouped query.
+
+    Uses the same visibility rule as ``browse_listings``; nothing comes from ``market_prices``.
+    """
+    result = await session.execute(
+        select(ProduceListing.market, func.count(ProduceListing.id))
+        .join(User, User.id == ProduceListing.farmer_id)
+        .where(buyer_visible_listings_clause())
+        .group_by(ProduceListing.market)
+        .order_by(ProduceListing.market.asc())
+    )
+    return [BuyerMarketOut(name=market, listing_count=int(count)) for market, count in result.all()]
+
+
+async def get_owned_listing(session: AsyncSession, farmer: User, listing_id: UUID) -> ListingOut:
+    """Return one of this farmer's listings in any status; a missing or foreign id is the same 404."""
+    listing = await session.scalar(
+        select(ProduceListing).where(ProduceListing.id == listing_id, ProduceListing.farmer_id == farmer.id)
+    )
+    if listing is None:
+        raise AppError(status.HTTP_404_NOT_FOUND, "listing_not_found", "Listing not found.")
+    return _listing_out(listing)
 
 
 async def my_listings(

@@ -167,3 +167,10 @@ class PublicListingDetail(PublicListingOut):
 
 class PublicListingPage(Page[PublicListingOut]):
     pass
+
+
+class BuyerMarketOut(BaseModel):
+    """A market with at least one listing a buyer can buy; no price or market data beyond the count."""
+
+    name: str
+    listing_count: int

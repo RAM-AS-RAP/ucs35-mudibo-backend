@@ -872,6 +872,25 @@
         "title": "Body_update_listing_api_v1_listings__listing_id__patch",
         "type": "object"
       },
+      "BuyerMarketOut": {
+        "description": "A market with at least one listing a buyer can buy; no price or market data beyond the count.",
+        "properties": {
+          "listing_count": {
+            "title": "Listing Count",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "listing_count"
+        ],
+        "title": "BuyerMarketOut",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2434,6 +2453,10 @@
             "title": "Expires In",
             "type": "integer"
           },
+          "is_super_admin": {
+            "title": "Is Super Admin",
+            "type": "boolean"
+          },
           "must_change_password": {
             "title": "Must Change Password",
             "type": "boolean"
@@ -2452,6 +2475,7 @@
           "access_token",
           "expires_in",
           "role",
+          "is_super_admin",
           "must_change_password"
         ],
         "title": "TokenResponse",
@@ -2663,6 +2687,10 @@
             "title": "Id",
             "type": "string"
           },
+          "is_super_admin": {
+            "title": "Is Super Admin",
+            "type": "boolean"
+          },
           "must_change_password": {
             "title": "Must Change Password",
             "type": "boolean"
@@ -2686,6 +2714,7 @@
           "phone_number",
           "email",
           "role",
+          "is_super_admin",
           "must_change_password",
           "created_at"
         ],
@@ -4604,6 +4633,36 @@
         ]
       }
     },
+    "/api/v1/listings/markets": {
+      "get": {
+        "operationId": "buyer_markets_api_v1_listings_markets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BuyerMarketOut"
+                  },
+                  "title": "Response Buyer Markets Api V1 Listings Markets Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Buyer Markets",
+        "tags": [
+          "listings"
+        ]
+      }
+    },
     "/api/v1/listings/mine": {
       "get": {
         "operationId": "my_listings_api_v1_listings_mine_get",
@@ -4770,6 +4829,54 @@
           }
         ],
         "summary": "Farmer Orders",
+        "tags": [
+          "listings"
+        ]
+      }
+    },
+    "/api/v1/listings/mine/{listing_id}": {
+      "get": {
+        "operationId": "my_listing_api_v1_listings_mine__listing_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "listing_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Listing Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "My Listing",
         "tags": [
           "listings"
         ]

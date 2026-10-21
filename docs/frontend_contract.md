@@ -16,12 +16,14 @@ This document is for the frontend repository (the AgriSence PWA and admin screen
 - `POST /auth/login` with `{"identifier": "<phone or email>", "password": "..."}` returns:
 
   ```json
-  {"access_token": "...", "token_type": "bearer", "expires_in": 3600, "role": "farmer", "must_change_password": false}
+  {"access_token": "...", "token_type": "bearer", "expires_in": 3600, "role": "farmer", "is_super_admin": false, "must_change_password": false}
   ```
+
+- `GET /auth/me` returns the profile: `id`, `name`, `phone_number`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at`. Registration and `POST /auth/accept-invite` return the same shape (with `is_super_admin: false`).
 
 - Send `Authorization: Bearer <access_token>` on every other call. Tokens last 60 minutes (`expires_in` seconds). There is no refresh token: when the token expires, the user logs in again.
 - **On any 401, clear the stored session and go to the login screen.** A 401 also happens after the account is disabled or the password was changed on another device.
-- Route the user by `role` (`farmer`, `buyer`, `admin`). The super admin is an `admin` account with a flag that `GET /auth/me` does not return. To decide whether to show the super admin screens, call `GET /admin/users?role=admin&q=<email from /auth/me>` once after login and read `is_super_admin` on the row whose `id` is the user's own. (The invite routes would also answer 403 for an ordinary admin, but they are rate limited, so do not use them as a probe.)
+- Route the user by `role` (`farmer`, `buyer`, `admin`). The super admin is an `admin` account with `is_super_admin: true`. Read the flag from the login response or, after a reload, from `GET /auth/me`; both come from the database row (the token does not carry it). Show the super admin screens (Invites, email check) only when it is true. Do not probe the invite routes to find out: they are rate limited.
 - If `must_change_password` is true, or any call returns **403 `password_change_required`**, show the change-password screen. Only `POST /auth/change-password` and `GET /auth/me` work until then. After a successful change, the response says `login_required: true`. Discard the token and log in again.
 - Registration: `POST /auth/register/farmer` or `/auth/register/buyer` with `{"name", "phone_number", "email" (optional), "password"}`. The password needs 8 to 128 characters with an upper case letter, a lower case letter, a digit and a symbol. Kenyan phone numbers may be typed as `07…`, `01…`, `+254…` or `254…`.
 
@@ -122,9 +124,10 @@ Any other code: show the generic message plus the reference.
 | Accept admin invitation | public | `POST /auth/accept-invite`, `POST /auth/invite/request-code` |
 | Market prices | farmer, admin | `GET /markets`, `GET /prices/current?crop=`, `GET /prices/trends?market=&crop=&months=` |
 | Forecast | farmer, admin | `GET /forecasts?market=&crop=&horizon=` |
-| My listings, new and edit listing | farmer | `GET /listings/mine`, `POST /listings`, `PATCH /listings/{id}`, `DELETE /listings/{id}` |
+| My listings, new listing | farmer | `GET /listings/mine`, `POST /listings`, `DELETE /listings/{id}` |
+| Edit listing | farmer | `GET /listings/mine/{id}` to load it (any status; a `removed` listing is shown read-only), then `PATCH /listings/{id}` |
 | Orders on my listings | farmer | `GET /listings/mine/orders` |
-| Browse produce, listing detail | buyer | `GET /listings`, `GET /listings/{id}` |
+| Browse produce, listing detail | buyer | `GET /listings`, `GET /listings/{id}`; the market filter reads `GET /listings/markets` |
 | Checkout and order status | buyer | `POST /orders`, `GET /orders/{id}`, `POST /orders/{id}/pay`, `POST /orders/{id}/cancel` |
 | My orders | buyer | `GET /orders/mine` |
 | Admin dashboard | admin | `GET /admin/stats` |
@@ -132,9 +135,12 @@ Any other code: show the generic message plus the reference.
 | Listing moderation | admin | `GET /admin/listings`, `DELETE /admin/listings/{id}` |
 | Orders and payments, reconciliation | admin | `GET /admin/orders`, `GET /admin/orders/{id}`, `POST /admin/orders/{id}/resolve`, `GET /admin/payments`, `GET /admin/payments/{id}/events`, `GET /orders/{id}` (read only) |
 | Forecast accuracy | admin | `GET /admin/forecast-accuracy` |
-| Admin invitations, email check | super admin only | `POST /admin/invites`, `GET /admin/invites`, `POST /admin/invites/{id}/resend`, `DELETE /admin/invites/{id}`, `POST /admin/email/test` |
+| Admin invitations (Invites), email check | super admin only: shown when `is_super_admin` is true in the profile | `POST /admin/invites`, `GET /admin/invites`, `POST /admin/invites/{id}/resend`, `DELETE /admin/invites/{id}`, `POST /admin/email/test` |
 
-Buyers never see prices or forecasts (403). Farmers never see the buyer browse screens (403). Hide the super admin screens unless that lookup showed `is_super_admin: true`. The server still checks every role, so hiding a screen is only a convenience.
+Buyers never see prices or forecasts (403). Farmers never see the buyer browse screens (403). Hide the super admin screens unless the profile has `is_super_admin: true`. The server still checks every role, so hiding a screen is only a convenience.
+
+- Buyer market filter: `GET /listings/markets` returns `[{"name": "Kisumu", "listing_count": 2}, ...]` ordered by name, only for markets with at least one listing the buyer can buy (`[]` when nothing is listed). Offer exactly these names and pass the chosen one as `GET /listings?market=<name>`; its `total` equals that `listing_count`. It carries no prices.
+- Farmer edit screen: `GET /listings/mine/{id}` returns the same `ListingOut` as a `GET /listings/mine` item. A 404 `listing_not_found` means the listing does not exist or is not the farmer's; go back to My listings.
 
 ### Forecast display
 

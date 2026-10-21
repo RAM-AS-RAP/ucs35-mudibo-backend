@@ -79,10 +79,10 @@ A manual script, never part of `pytest`. It exercises the three user journeys ov
 What it checks:
 
 - System: health, database health, CORS for an allowed and a disallowed origin, the uniform 404 body, and `X-Request-ID` plus `Cache-Control: no-store` on every response.
-- Farmer: registration with `role` in the body is rejected, then register, login, `GET /auth/me`, markets, current prices, trends, and forecasts (SKIP when none exist yet). Then listings with and without a photo, the photo URL, quantity 0 and back, delete, and 403 on buyer routes.
-- Buyer: 403 on prices and forecasts, browsing with filters and sorting, detail, an order with the server total, 409 `pending_order_exists`, cancel with the stock returned, a new order, and the order list and detail.
+- Farmer: registration with `role` in the body is rejected, then register, login, `GET /auth/me`, markets, current prices, trends, and forecasts (SKIP when none exist yet). Then listings with and without a photo, the photo URL, quantity 0 and back, delete, reading a created (and the removed) listing through `GET /listings/mine/{id}`, and 403 on buyer routes. Registration and login must say `is_super_admin: false`.
+- Buyer: 403 on prices and forecasts, browsing with filters and sorting, detail, `GET /listings/markets` containing the market of the listing created in the run (with a count equal to the filtered browse total), an order with the server total, 409 `pending_order_exists`, cancel with the stock returned, a new order, and the order list and detail.
 - Payments: per `E2E_PAYMENTS`. In `simulate` it also checks that replaying the idempotency key changes nothing, that the farmer sees the paid order without buyer contact details, and that a duplicate callback changes nothing.
-- Admin: stats, filtered users, listings, orders, payments, and forecast accuracy. Farmers and buyers get 403 on admin routes. After the e2e users are disabled, their next requests get 401 and the disabled farmer's listing is hidden.
+- Admin: the super admin's login and `GET /auth/me` say `is_super_admin: true`; stats, filtered users, listings, orders, payments, and forecast accuracy. Farmers and buyers get 403 on admin routes. After the e2e users are disabled, their next requests get 401 and the disabled farmer's listing is hidden.
 - Invites (optional) as above.
 - Cleanup (always, even after a failure): cancel pending orders, remove the e2e listings, and disable the e2e users. It prints how many disabled `ZZ_E2E_` users remain, because users cannot be deleted.
 

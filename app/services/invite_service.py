@@ -357,8 +357,8 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
                 " (name, phone_number, email, password_hash, role, is_super_admin, must_change_password,"
                 "  created_by, password_changed_at)"
                 " values (:name, :phone, :email, :password_hash, 'admin', false, false, :created_by, now())"
-                " returning id, name, phone_number, email, cast(role as text) as role, must_change_password,"
-                "           created_at"
+                " returning id, name, phone_number, email, cast(role as text) as role, is_super_admin,"
+                "           must_change_password, created_at"
             ),
             {
                 "name": claimed["name"],

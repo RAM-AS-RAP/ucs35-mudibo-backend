@@ -98,4 +98,6 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     role: str
+    # From the users row at login, for the client UI only; the JWT never carries it.
+    is_super_admin: bool
     must_change_password: bool

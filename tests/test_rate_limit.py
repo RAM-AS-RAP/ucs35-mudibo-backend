@@ -51,7 +51,9 @@ async def test_identifier_throttle_blocks_correct_password_until_window_expires(
             await auth_service.login(SimpleNamespace(), "buyer@example.com", "wrong")
 
     async def successful_authentication(session, identifier, password):
-        return SimpleNamespace(id="user-1", role=SimpleNamespace(value="buyer"), must_change_password=False)
+        return SimpleNamespace(
+            id="user-1", role=SimpleNamespace(value="buyer"), is_super_admin=False, must_change_password=False
+        )
 
     monkeypatch.setattr(auth_service, "authenticate", successful_authentication)
     with pytest.raises(TooManyAttempts):
