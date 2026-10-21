@@ -24,7 +24,7 @@ Public. Same body as farmer registration. Returns 201 with the created buyer acc
 
 ### POST /api/v1/auth/login
 
-Public. Phone/email `identifier` and `password`. Returns the bearer token, `expires_in`, `role` and `must_change_password`.
+Public. Phone/email `identifier` and `password`. Returns the bearer token, `expires_in`, `role`, `is_super_admin` and `must_change_password`.
 
 ### POST /api/v1/auth/change-password
 
@@ -32,7 +32,7 @@ Any authenticated user, also while a password change is required. Current and ne
 
 ### GET /api/v1/auth/me
 
-Any authenticated user. Returns the current account.
+Any authenticated user. Returns the current account (`UserOut`), including `is_super_admin` read from the database row.
 
 ### POST /api/v1/auth/accept-invite
 
@@ -78,6 +78,10 @@ Farmer. Optional `status`, `limit` (1-100, default 20), `offset`. Own listings, 
 
 Farmer. Optional order `status`, `listing_id`, `limit` (1-100, default 20), `offset`. Paginated orders on the farmer's own listings, with latest payment metadata, the buyer's name only, and a sandbox/delivery note.
 
+### GET /api/v1/listings/mine/{listing_id}
+
+Farmer. Path `listing_id` (UUID). Returns one of the farmer's own listings as `ListingOut` (the same fields as a `GET /listings/mine` item) in any status, including `sold_out` and `removed`. No buyer or order data. Another farmer's listing and an unknown id return the same 404 `listing_not_found`; a non-UUID id returns 422. See [Details: `GET /listings/mine/{id}`](#details-get-listingsmineid).
+
 ### PATCH /api/v1/listings/{listing_id}
 
 Owning farmer. Multipart optional quantity, price, image replacement, or `remove_image`. Returns the updated `ListingOut`. Errors: `listing_not_found` (404), `listing_removed` (409), `no_changes` (422).
@@ -89,6 +93,10 @@ Owning farmer. Soft-removes the listing and returns 204; a repeat delete is idem
 ### GET /api/v1/listings
 
 Buyer. Optional `crop`, `market`, `min_price`, `max_price`, `sort`, `limit`, `offset`. Paginated active listings with stock (`PublicListingOut`). See [Buyer marketplace API](#buyer-marketplace-api).
+
+### GET /api/v1/listings/markets
+
+Buyer. No parameters. Markets that have at least one listing a buyer could buy (same rule as `GET /listings`), ordered by name, as `[{"name", "listing_count"}]`; `[]` when nothing is listed. No price data. See [Details: `GET /listings/markets`](#details-get-listingsmarkets).
 
 ### GET /api/v1/listings/{listing_id}
 
@@ -206,7 +214,7 @@ Public, development only. The live OpenAPI schema; the committed copy is `docs/o
 
 Error examples in the rest of this document leave out `request_id` for brevity; real error bodies always include it.
 
-Admin routes are described in [Admin API](#admin-api) and operated with [admin.md](admin.md). Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access markets or farmer listing routes; only farmers and admins can read market data.
+Admin routes are described in [Admin API](#admin-api) and operated with [admin.md](admin.md). Payments run only against the Safaricom Daraja sandbox (see [payments.md](payments.md)). Buyers cannot see prices or forecasts and cannot access `GET /markets` or farmer listing routes; only farmers and admins can read market data. Buyers get `GET /listings/markets` instead, which lists only markets with buyer-visible listings and their counts.
 
 Only markets with published price data are offered (currently Nairobi and Kisumu). Crop values are `maize` or `beans`; forecast horizons are `one_month` or `two_month`. Market/crop values are normalized for case and surrounding whitespace. Unsupported values return 422; no-data markets return 404 `market_not_available`. A forecast is shown only when its origin equals the series' latest price month and that month is no more than two calendar months old in `Africa/Nairobi`; otherwise it returns 404 `forecast_unavailable` with reason `no_forecast` or `stale`. Prices and forecasts are read from stored pipeline output; this API does not invent or compute them.
 
@@ -225,6 +233,7 @@ All protected routes return `401` when unauthenticated and `403 forbidden` when 
 | `PATCH /listings/{id}` | 200 | 404 `listing_not_found`; 409 `listing_removed`; 413 `image_too_large`; 422 `no_changes`, `invalid_image`, or `validation_error`. |
 | `DELETE /listings/{id}` | 204 | 404 `listing_not_found`; 409 `listing_has_pending_orders`. Deleting an already removed listing also returns 204. |
 | `GET /listings/mine/orders` | 200 | 422 `validation_error` for invalid filters or pagination. |
+| `GET /listings/mine/{id}` | 200 (any status, including `sold_out` and `removed`) | 404 `listing_not_found` (another farmer's listing and an unknown id give identical bodies); 422 `validation_error` for a non-UUID id. Buyers and admins get 403. |
 
 Errors use `{"error":{"code":"...","message":"...","request_id":"..."}}`; forecast errors may also include `reason`.
 
@@ -313,6 +322,18 @@ Listing responses use `ListingOut`: `id`, `farmer_id`, `crop`, `market`, `quanti
 }
 ```
 
+#### Details: `GET /listings/mine/{id}`
+
+Path parameter: `listing_id` (UUID). Returns the farmer's own listing as `ListingOut`, exactly as it appears in `GET /listings/mine` (same fields, and `image_url` is built the same way). Every status is returned, so the edit screen can load a `sold_out` listing or show a `removed` one read-only. It is a plain read: it takes no lock and never contains buyer, order or payment data.
+
+| Status | Body |
+| --- | --- |
+| 200 | `ListingOut`, for example the object above with `"status": "removed"`. |
+| 401 | `invalid_credentials` without a valid token. |
+| 403 | `forbidden` for buyers and admins. |
+| 404 | `{"error": {"code": "listing_not_found", "message": "Listing not found.", "request_id": "..."}}`, identical for another farmer's listing and an unknown id. |
+| 422 | `validation_error` when `listing_id` is not a UUID. |
+
 `GET /listings/mine/orders` returns paginated `items` and a `note`. Items include the order snapshot, buyer name, and latest payment status/environment/receipt/completion time. Buyer phone, email, and ID, and payment idempotency/request IDs and result descriptions, are never returned.
 
 ```json
@@ -352,6 +373,7 @@ Stock is reserved at checkout: the ordered quantity is removed from the listing 
 | Method and path | Roles | Success | Other status codes and error codes |
 | --- | --- | --- | --- |
 | `GET /listings` | Buyer | 200 | 422 `validation_error` (bad crop, unknown market, negative or reversed price range, bad sort or pagination). |
+| `GET /listings/markets` | Buyer | 200 (`[]` when nothing is listed) | None besides 401 and 403. |
 | `GET /listings/{id}` | Buyer | 200 | 404 `listing_not_found` (removed or unknown, identical bodies); 422 for a non-UUID id. |
 | `POST /orders` | Buyer | 201 | 404 `listing_not_found`; 409 `listing_unavailable`, `insufficient_stock`, `pending_order_exists` (with `existing_order_id`), `too_many_pending_orders`; 422 `order_too_small` or `validation_error`; 429 `rate_limited` (30 per hour per IP). |
 | `GET /orders/mine` | Buyer | 200 | 422 `validation_error` for an invalid status or pagination. |
@@ -359,7 +381,9 @@ Stock is reserved at checkout: the ordered quantity is removed from the listing 
 | `POST /orders/{id}/cancel` | Owning buyer | 200 (also for an already cancelled order) | 404 `order_not_found`; 409 `order_not_cancellable` (paid, expired, or any other non-pending status), `payment_in_progress`; 429 `rate_limited` (30 per hour per IP). |
 | `POST /orders/{id}/pay` | Owning buyer | 202 (also for a replay of the same key) | 404 `order_not_found`; 409 `order_not_payable`, `order_expiring` (`reason` `expired` or `too_close`), `payment_in_progress`, `max_attempts_reached`; 422 `idempotency_key_required`, `invalid_idempotency_key`, `body_not_allowed`; 429 `too_many_payment_attempts` or `rate_limited` (10 per minute per IP); 502 `payment_request_failed`; 503 `payments_unavailable`. |
 
-All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
+All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings`, `GET /listings/markets` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
+
+A listing is visible to buyers when it is `active`, has `quantity_available > 0` and its farmer is not disabled. This one rule (`buyer_visible_listings_clause()` in `app/services/listing_service.py`) decides what `GET /listings` returns, what `GET /listings/markets` counts, the `available` flag of `GET /listings/{id}` and whether `POST /orders` accepts the listing.
 
 #### Details: `GET /listings`
 
@@ -388,6 +412,19 @@ Query parameters: `crop` (`maize` or `beans`), `market` (must exist in `market_l
 ```
 
 Listings show the seller's name only, never the farmer's id, phone number, or email.
+
+#### Details: `GET /listings/markets`
+
+No parameters. Returns the markets that currently have at least one buyer-visible listing, ordered by market name, so the browse market filter offers only choices that return results. It is one grouped query over `produce_listings` (joined to `users` for the disabled-farmer rule). Nothing comes from `market_prices`: no prices, no `latest_month`, and a market with price data but no listings is not returned.
+
+```json
+[
+	{"name": "Kisumu", "listing_count": 2},
+	{"name": "Nairobi", "listing_count": 7}
+]
+```
+
+With nothing listed the response is `[]`. The sum of `listing_count` equals the `total` of an unfiltered `GET /listings`, and each count equals the `total` of `GET /listings?market=<name>`. Status codes: 200; 401 `invalid_credentials` without a valid token; 403 `forbidden` for farmers and admins.
 
 #### Details: `GET /listings/{id}`
 
@@ -718,7 +755,20 @@ New passwords chosen through change-password, invite acceptance and password res
 }
 ```
 
-Successful registration returns `201` and a user projection containing `id`, `name`, normalized `phone_number`, `email`, `role`, `must_change_password`, and `created_at`. It never includes a password hash or disabled-account details.
+Successful registration returns `201` and a user projection (`UserOut`) containing `id`, `name`, normalized `phone_number`, `email`, `role`, `is_super_admin` (always false here), `must_change_password`, and `created_at`. It never includes a password hash or disabled-account details. `is_super_admin` cannot be sent: like every unknown field it is rejected with 422.
+
+```json
+{
+	"id": "123e4567-e89b-12d3-a456-426614174002",
+	"name": "Amina Farmer",
+	"phone_number": "254712345678",
+	"email": "amina@example.com",
+	"role": "farmer",
+	"is_super_admin": false,
+	"must_change_password": false,
+	"created_at": "2026-10-01T08:00:00Z"
+}
+```
 
 `POST /auth/login` accepts `identifier` (email or Kenyan phone number) and `password`. A successful response is `200`:
 
@@ -728,9 +778,12 @@ Successful registration returns `201` and a user projection containing `id`, `na
 	"token_type": "bearer",
 	"expires_in": 3600,
 	"role": "farmer",
+	"is_super_admin": false,
 	"must_change_password": false
 }
 ```
+
+`is_super_admin` is read from the user's database row at login and is true only for the super admin. It is for the client UI (for example showing the Invites screen); the token does not carry it, and every super-admin route checks the database row again.
 
 `POST /auth/change-password` accepts `current_password` and `new_password`, rejects a new password equal to the current password, and returns `200`:
 
@@ -738,7 +791,7 @@ Successful registration returns `201` and a user projection containing `id`, `na
 {"message": "Password changed. Log in again: your current access token is no longer accepted.", "login_required": true}
 ```
 
-`GET /auth/me` returns the current user projection.
+`GET /auth/me` returns the current user projection (`UserOut`, same fields as the registration response). Its `is_super_admin` comes from the row loaded for this request, so it reflects the database even if the flag changed after login.
 
 Access tokens carry their issue time (`iat`, whole seconds). Every password change (change-password, invite acceptance, password reset, and the seed script) sets `users.password_changed_at` from the database clock, and a token whose `iat` is earlier than the whole second of `password_changed_at` gets the same 401 as any invalid token. A token issued in the same second as the change stays valid.
 
@@ -771,7 +824,7 @@ These public routes need no token. Codes are 8 characters from `ABCDEFGHJKMNPQRS
 {"email": "grace@example.com", "code": "K7QX-2MPA", "password": "A-long-private-passw0rd"}
 ```
 
-The password policy is checked first (admin rules) and a failure returns 422 `password_too_weak` that reveals nothing about any invite. The attempt is then counted in its own committed transaction, so a failed guess always counts; after `INVITE_MAX_ATTEMPTS` (10) wrong codes in total, across all resends, the invite is locked and even the correct code is refused. A correct code claims the invite and creates the admin in one transaction: `role=admin`, `is_super_admin=false`, `must_change_password=false`, `created_by` = the inviting super admin. The response is 201 with the user projection, and the new admin logs in normally. An unknown email, a wrong code, an expired code or invite, a used, revoked or locked invite and a duplicate phone or email all return the same response:
+The password policy is checked first (admin rules) and a failure returns 422 `password_too_weak` that reveals nothing about any invite. The attempt is then counted in its own committed transaction, so a failed guess always counts; after `INVITE_MAX_ATTEMPTS` (10) wrong codes in total, across all resends, the invite is locked and even the correct code is refused. A correct code claims the invite and creates the admin in one transaction: `role=admin`, `is_super_admin=false`, `must_change_password=false`, `created_by` = the inviting super admin. The response is 201 with the user projection (`is_super_admin: false`), and the new admin logs in normally. An unknown email, a wrong code, an expired code or invite, a used, revoked or locked invite and a duplicate phone or email all return the same response:
 
 ```json
 {"error": {"code": "invalid_or_expired_code", "message": "The code is invalid or has expired."}}

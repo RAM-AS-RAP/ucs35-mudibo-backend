@@ -23,6 +23,10 @@
 - Buyers see the seller's name on listings and orders, but never the farmer's id, phone number, or email.
 - Only a `pending_payment` order without an open payment can be cancelled; cancelling returns stock and is idempotent. Module 5's pay endpoint must lock the order row `FOR UPDATE` before inserting a payment and check that it is `pending_payment` and not expired, rather than relying on the payment insert trigger.
 - Admins may read a single order (`GET /orders/{id}`) but cannot act on it; `can_pay` and `can_cancel` are always false for them.
+- The super admin flag is exposed to the signed-in user (login response and profile) from the database row, never from the token; it is a UI hint only and authorization still reads the row.
+- Farmers can read one of their own listings (`GET /listings/mine/{id}`) in any status, including removed ones; another farmer's listing is the same 404 as an unknown id.
+- Buyers see only markets that currently have buyer-visible listings (`GET /listings/markets`), not markets with price data, and no price data at all.
+- One shared visibility rule for buyer listings (active, in stock, farmer not disabled: `buyer_visible_listings_clause()` and its loaded-row form) decides browse, the markets list, the detail `available` flag and checkout.
 
 # Payment decisions
 
