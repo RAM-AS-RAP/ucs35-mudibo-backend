@@ -135,6 +135,7 @@ async def test_public_routes_work_without_a_token(api_client, application, monke
             "phone_number": "254712000001",
             "email": "grace@example.com",
             "role": "admin",
+            "is_super_admin": False,
             "must_change_password": False,
             "created_at": NOW,
         }
@@ -482,6 +483,7 @@ def inserted_user(db):
             "phone_number": params["phone"],
             "email": params["email"],
             "role": "admin",
+            "is_super_admin": False,
             "must_change_password": False,
             "created_at": NOW,
         }
@@ -502,7 +504,7 @@ async def test_a_correct_code_creates_an_admin_who_can_log_in(api_client, applic
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert (body["role"], body["must_change_password"]) == ("admin", False)
+    assert (body["role"], body["is_super_admin"], body["must_change_password"]) == ("admin", False, False)
     assert STRONG_PASSWORD not in response.text and "password_hash" not in response.text
     insert_sql = db.statements[db.index_of("insert into public.users")]
     assert "'admin', false, false" in insert_sql and "password_changed_at" in insert_sql
@@ -526,6 +528,7 @@ async def test_a_correct_code_creates_an_admin_who_can_log_in(api_client, applic
     auth_service.get_login_throttle().reset()
     login = await auth_service.login(FakeDB(scalars=[admin]).session(), "grace@example.com", STRONG_PASSWORD)
     assert login["role"] == "admin" and login["must_change_password"] is False
+    assert login["is_super_admin"] is False
 
 
 def step_a_sql(db):

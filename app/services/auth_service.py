@@ -158,6 +158,7 @@ async def login(session: AsyncSession, identifier: str, password: str) -> dict[s
         "token_type": "bearer",
         "expires_in": settings.access_token_expire_minutes * 60,
         "role": user.role.value,
+        "is_super_admin": bool(user.is_super_admin),
         "must_change_password": user.must_change_password,
     }
 
