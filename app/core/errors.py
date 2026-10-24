@@ -31,7 +31,7 @@ _STATUS_CODES = {
 }
 
 # Validation messages for these fields are dropped if they ever contain the submitted value.
-_SENSITIVE_FIELDS = {"password", "current_password", "new_password", "code", "token", "identifier"}
+_SENSITIVE_FIELDS = {"password", "current_password", "new_password", "code", "token", "identifier", "phone_number"}
 
 # SQLSTATE values that mean "try again shortly": lock timeout, deadlock, serialization failure.
 BUSY_SQLSTATES = {"55P03", "40P01", "40001"}
@@ -79,12 +79,15 @@ class AppError(ServiceError):
         message: str,
         reason: str | None = None,
         extra: Mapping[str, str] | None = None,
+        retry_after: int | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.reason = reason
         self.extra = dict(extra or {})
+        # Seconds for the Retry-After header of a 429; None uses the default for the code.
+        self.retry_after = retry_after
 
 
 class PayloadTooLarge(StarletteHTTPException):
@@ -258,6 +261,9 @@ def install_error_handlers(app: FastAPI) -> None:
 
 
 def _service_retry_after(exc: ServiceError) -> int:
+    retry_after = getattr(exc, "retry_after", None)
+    if isinstance(retry_after, int) and retry_after >= 1:
+        return retry_after
     settings = get_settings()
     if isinstance(exc, TooManyAttempts):
         return settings.login_failure_window_minutes * 60

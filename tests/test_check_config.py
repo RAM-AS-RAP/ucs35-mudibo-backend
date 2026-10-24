@@ -93,6 +93,28 @@ def test_each_setting_is_classified(setting, value, expected) -> None:
     assert main(env, env_file=None, out=io.StringIO()) == 1
 
 
+@pytest.mark.parametrize("target", ["entered", "registered", "test_msisdn", ""])
+def test_every_stk_target_is_accepted(target) -> None:
+    env = {**valid_production(), "MPESA_STK_TARGET": target}
+    assert status_of(env, "MPESA_STK_TARGET") == OK
+    assert main(env, env_file=None, out=io.StringIO()) == 0
+
+
+def test_registered_is_reported_as_an_alias_of_entered() -> None:
+    checks = run_checks({**valid_production(), "MPESA_STK_TARGET": "registered"})
+    check = next(c for c in checks if c.item == "MPESA_STK_TARGET")
+    assert "prefer entered" in check.note
+
+
+@pytest.mark.parametrize("target", ["buyer-phone", "somebody-else", "REGISTERED-NUMBER"])
+def test_other_stk_targets_are_invalid_and_never_printed(target) -> None:
+    env = {**valid_production(), "MPESA_STK_TARGET": target}
+    assert status_of(env, "MPESA_STK_TARGET") == INVALID
+    out = io.StringIO()
+    assert main(env, env_file=None, out=out) == 1
+    assert target not in out.getvalue()
+
+
 def test_console_email_is_invalid_in_production_but_fine_in_development() -> None:
     assert status_of({**valid_production(), "EMAIL_PROVIDER": "console"}, "EMAIL_PROVIDER") == INVALID
     development = {**valid_production(), "APP_ENV": "development", "EMAIL_PROVIDER": "console"}
@@ -125,6 +147,8 @@ def test_no_value_is_ever_printed() -> None:
         {**env, "MPESA_CALLBACK_TOKEN": "bad/token-value-1234567"},
         {**env, "EMAIL_PROVIDER": "smtp", "SMTP_USERNAME": "smtp-user-value", "SMTP_PASSWORD": "smtp-password-value"},
         {**env, "MPESA_STK_TARGET": "test_msisdn", "MPESA_TEST_MSISDN": "254708374149"},
+        {**env, "MPESA_STK_TARGET": "entered"},
+        {**env, "MPESA_STK_TARGET": "registered"},
     ]
     for variant in variants:
         out = io.StringIO()

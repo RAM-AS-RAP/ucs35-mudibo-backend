@@ -59,12 +59,17 @@ class Settings(BaseSettings):
     mpesa_passkey: str = ""
     mpesa_callback_base_url: str = ""
     mpesa_callback_token: str = ""
-    mpesa_stk_target: Literal["registered", "test_msisdn"] = "registered"
+    # "entered" sends the prompt to the number the buyer entered for the payment. "registered" is a
+    # backwards compatible alias of "entered" (a startup warning is logged). "test_msisdn" sends every
+    # prompt to MPESA_TEST_MSISDN.
+    mpesa_stk_target: Literal["entered", "registered", "test_msisdn"] = "entered"
     mpesa_test_msisdn: str = "254708374149"
     mpesa_max_attempts_per_order: int = 3
     mpesa_min_seconds_before_expiry: int = 90
     mpesa_stale_initiating_seconds: int = 60
     mpesa_phone_attempts_per_hour: int = 5
+    mpesa_buyer_attempts_per_hour: int = 10
+    mpesa_buyer_distinct_phones_per_day: int = 3
     mpesa_query_min_interval_seconds: int = 20
     mpesa_timeout_reconcile_window_minutes: int = 15
     mpesa_transaction_desc: str = "Crop order"
@@ -267,6 +272,20 @@ class Settings(BaseSettings):
     def validate_positive_payment_limits(cls, value: int) -> int:
         if value < 1:
             raise ValueError("Payment limits must be positive")
+        return value
+
+    @field_validator("mpesa_buyer_attempts_per_hour")
+    @classmethod
+    def validate_buyer_attempts_per_hour(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("MPESA_BUYER_ATTEMPTS_PER_HOUR must be between 1 and 100")
+        return value
+
+    @field_validator("mpesa_buyer_distinct_phones_per_day")
+    @classmethod
+    def validate_buyer_distinct_phones_per_day(cls, value: int) -> int:
+        if not 1 <= value <= 20:
+            raise ValueError("MPESA_BUYER_DISTINCT_PHONES_PER_DAY must be between 1 and 20")
         return value
 
     @field_validator("resolve_note_min_length")
