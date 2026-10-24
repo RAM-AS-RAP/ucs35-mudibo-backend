@@ -294,7 +294,7 @@ MPESA_TEST_MSISDN=254708374149
 ```
 
 - `MPESA_CALLBACK_BASE_URL` must start with `https://` and has no trailing path; the API appends `/api/v1/payments/callback/<token>` itself.
-- `MPESA_STK_TARGET=test_msisdn` sends every prompt to the sandbox test number. Use `registered` (the `.env.example` default) to send it to the buyer's registered phone instead.
+- `MPESA_STK_TARGET=test_msisdn` sends every prompt to the sandbox test number. Use `entered` (the `.env.example` default) to send it to the M-Pesa number the buyer enters when paying instead. `registered` is still accepted as a deprecated alias of `entered` (the API logs a warning at startup); prefer `entered`.
 - The other `MPESA_*` limits are optional; see [Environment reference](#environment-reference).
 
 ### 8.6 Start the API and the tunnel
@@ -472,12 +472,14 @@ Before deploying, run `python scripts/check_config.py` in the target environment
 | `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | Daraja sandbox OAuth credentials. |
 | `MPESA_SHORTCODE` / `MPESA_PASSKEY` | Daraja sandbox STK credentials. |
 | `MPESA_CALLBACK_BASE_URL` / `MPESA_CALLBACK_TOKEN` | Public callback base URL and secret path token. |
-| `MPESA_STK_TARGET` | `registered` or `test_msisdn` for sandbox prompts. |
+| `MPESA_STK_TARGET` | `entered` (default: the number the buyer enters when paying), `test_msisdn` (every prompt to `MPESA_TEST_MSISDN`), or `registered` (deprecated alias of `entered`). |
 | `MPESA_TEST_MSISDN` | Sandbox test phone used by `test_msisdn` mode (format `254[17]XXXXXXXX`). |
 | `MPESA_MAX_ATTEMPTS_PER_ORDER` | Payment attempts allowed per order (default 3). |
 | `MPESA_MIN_SECONDS_BEFORE_EXPIRY` | Seconds that must remain before order expiry to start a payment (default 90). |
 | `MPESA_STALE_INITIATING_SECONDS` | Age after which an unsent `initiating` payment is failed (default 60). |
-| `MPESA_PHONE_ATTEMPTS_PER_HOUR` | STK prompts allowed per phone per hour (default 5). |
+| `MPESA_PHONE_ATTEMPTS_PER_HOUR` | Payments allowed per entered number per hour, across all buyers (default 5). |
+| `MPESA_BUYER_ATTEMPTS_PER_HOUR` | Payments allowed per buyer per hour across all orders (default 10, 1 to 100). |
+| `MPESA_BUYER_DISTINCT_PHONES_PER_DAY` | Different numbers a buyer may pay with in 24 hours (default 3, 1 to 20). |
 | `MPESA_QUERY_MIN_INTERVAL_SECONDS` | Minimum gap between STK status queries for one payment (default 20). |
 | `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES` | How long a timed-out payment is still queried for a late success (default 15). |
 | `MPESA_TRANSACTION_DESC` | STK `TransactionDesc`, at most 13 characters (default `Crop order`). |

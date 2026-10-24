@@ -30,6 +30,7 @@ FAILING = {MISSING, WEAK, INVALID}
 
 SANDBOX_BASE_URL = "https://sandbox.safaricom.co.ke"
 SANDBOX_SHORTCODE = "174379"
+STK_TARGETS = ("entered", "registered", "test_msisdn")
 TRANSACTION_POOLER_PORT = 6543
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _URL_SAFE = re.compile(r"[A-Za-z0-9_-]+")
@@ -211,11 +212,14 @@ def check_mpesa(env: Mapping[str, str]) -> list[Check]:
     else:
         checks.append(Check("payments", "MPESA_CALLBACK_TOKEN", OK, f"{len(token)} characters"))
 
-    target = _get(env, "MPESA_STK_TARGET") or "registered"
-    if target not in ("registered", "test_msisdn"):
-        checks.append(Check("payments", "MPESA_STK_TARGET", INVALID, "registered or test_msisdn"))
+    target = _get(env, "MPESA_STK_TARGET") or "entered"
+    if target not in STK_TARGETS:
+        checks.append(Check("payments", "MPESA_STK_TARGET", INVALID, "entered, registered or test_msisdn"))
     elif target == "test_msisdn" and not _PHONE.fullmatch(_get(env, "MPESA_TEST_MSISDN") or "254708374149"):
         checks.append(Check("payments", "MPESA_TEST_MSISDN", INVALID, "must match 254[17]XXXXXXXX"))
+    elif target == "registered":
+        # Still accepted and behaves like "entered"; the application logs a startup warning.
+        checks.append(Check("payments", "MPESA_STK_TARGET", OK, "deprecated alias; prefer entered"))
     else:
         checks.append(Check("payments", "MPESA_STK_TARGET", OK, "a supported prompt target"))
     return checks

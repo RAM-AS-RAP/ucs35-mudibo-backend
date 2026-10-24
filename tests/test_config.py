@@ -78,6 +78,9 @@ def test_payment_settings_have_documented_defaults(valid_settings) -> None:
     assert settings.mpesa_min_seconds_before_expiry == 90
     assert settings.mpesa_stale_initiating_seconds == 60
     assert settings.mpesa_phone_attempts_per_hour == 5
+    assert settings.mpesa_buyer_attempts_per_hour == 10
+    assert settings.mpesa_buyer_distinct_phones_per_day == 3
+    assert settings.mpesa_stk_target == "entered"
     assert settings.mpesa_query_min_interval_seconds == 20
     assert settings.mpesa_timeout_reconcile_window_minutes == 15
     assert settings.callback_max_bytes == 16384
@@ -108,11 +111,50 @@ def test_empty_payment_settings_do_not_fail_startup(valid_settings) -> None:
         ("mpesa_transaction_desc", ""),
         ("mpesa_max_attempts_per_order", 0),
         ("callback_max_bytes", 0),
+        ("mpesa_buyer_attempts_per_hour", 0),
+        ("mpesa_buyer_attempts_per_hour", 101),
+        ("mpesa_buyer_distinct_phones_per_day", 0),
+        ("mpesa_buyer_distinct_phones_per_day", 21),
+        ("mpesa_stk_target", "buyer"),
+        ("mpesa_stk_target", ""),
     ],
 )
 def test_payment_settings_are_validated(valid_settings, field, value) -> None:
     with pytest.raises(ValidationError):
         Settings(**{**valid_settings, field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mpesa_buyer_attempts_per_hour", 1),
+        ("mpesa_buyer_attempts_per_hour", 100),
+        ("mpesa_buyer_distinct_phones_per_day", 1),
+        ("mpesa_buyer_distinct_phones_per_day", 20),
+    ],
+)
+def test_buyer_payment_limits_accept_their_range(valid_settings, field, value) -> None:
+    assert getattr(Settings(**{**valid_settings, field: value}), field) == value
+
+
+@pytest.mark.parametrize("target", ["entered", "registered", "test_msisdn"])
+def test_every_stk_target_is_accepted(valid_settings, target) -> None:
+    assert Settings(**{**valid_settings, "mpesa_stk_target": target}).mpesa_stk_target == target
+
+
+def test_registered_target_logs_one_startup_warning(valid_settings, caplog) -> None:
+    from app.services import payment_service
+
+    caplog.set_level("WARNING", logger=payment_service.logger.name)
+    payment_service.log_startup_warnings(Settings(**{**valid_settings, "mpesa_stk_target": "registered"}))
+    warnings = [record for record in caplog.records if "MPESA_STK_TARGET" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "entered" in warnings[0].getMessage()
+
+    caplog.clear()
+    payment_service.log_startup_warnings(Settings(**{**valid_settings, "mpesa_stk_target": "entered"}))
+    payment_service.log_startup_warnings(Settings(**{**valid_settings, "mpesa_stk_target": "test_msisdn"}))
+    assert not [record for record in caplog.records if "MPESA_STK_TARGET" in record.getMessage()]
 
 
 def test_payments_require_an_https_callback_base_url(valid_settings) -> None:

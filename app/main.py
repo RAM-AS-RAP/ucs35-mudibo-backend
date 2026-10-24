@@ -23,6 +23,7 @@ from app.db import get_engine
 from app.integrations import email as email_integration
 from app.integrations.daraja import DarajaClient, DarajaConfigError, redact_callback_url
 from app.routers import admin, auth, forecasts, listings, markets, orders, payments, prices
+from app.services import payment_service
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log_format)
     install_access_log_filter()
     email_integration.log_startup_warnings(settings)
+    payment_service.log_startup_warnings(settings)
     application = FastAPI(
         title="AgriSence Backend API",
         version="1.0.0",

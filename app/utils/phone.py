@@ -28,3 +28,8 @@ def mask_phone(value: object) -> str:
     if len(digits) < 3:
         return "***"
     return f"254*******{digits[-3:]}"
+
+
+def mask_phone_or_none(value: object) -> str | None:
+    """Like ``mask_phone``, but None stays None (no payment, or no number recorded)."""
+    return None if value is None else mask_phone(value)

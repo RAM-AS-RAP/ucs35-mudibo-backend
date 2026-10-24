@@ -36,7 +36,7 @@ def payment_settings(**overrides) -> Settings:
         "mpesa_shortcode": "174379",
         "mpesa_callback_base_url": "https://payments.example.test",
         "mpesa_callback_token": CALLBACK_TOKEN,
-        "mpesa_stk_target": "registered",
+        "mpesa_stk_target": "entered",
         "mpesa_test_msisdn": TEST_MSISDN,
     }
     values.update(overrides)
@@ -57,6 +57,11 @@ def compiled(statement) -> str:
     if hasattr(statement, "compile"):
         return str(statement.compile(dialect=postgresql.dialect()))
     return str(statement)
+
+
+def bound_values(statement) -> list[object]:
+    """The bound parameter values of a recorded statement."""
+    return list(statement.compile(dialect=postgresql.dialect()).params.values())
 
 
 class FakeResult:
@@ -102,6 +107,8 @@ class FakeDB:
         self.list_queue = list(lists)
         self.commit_errors = list(commit_errors)
         self.statements: list[str] = []
+        # The statement objects themselves, so tests can read their bound parameters.
+        self.raw_statements: list[object] = []
         self.added: list[object] = []
         self.added_by: list[tuple[FakeSession, object]] = []
         self.sessions: list[FakeSession] = []
@@ -156,6 +163,7 @@ class FakeSession:
         self.in_transaction = True
         sql = compiled(statement)
         self.db.statements.append(sql)
+        self.db.raw_statements.append(statement)
         return sql
 
     async def scalar(self, statement, params=None):
@@ -167,7 +175,12 @@ class FakeSession:
 
     async def execute(self, statement, params=None):
         del params
-        return self.db.pop(self.db.result_queue, self._record(statement))
+        sql = self._record(statement)
+        if "pg_advisory_xact_lock(hashtext(%(hashtext_1)s" in sql:
+            # The per buyer payment lock (a bound key) returns nothing useful, so it is recorded but
+            # never scripted. Other advisory locks, such as the invite lock, are still scripted.
+            return FakeResult()
+        return self.db.pop(self.db.result_queue, sql)
 
     def add(self, row):
         self.in_transaction = True
@@ -317,6 +330,7 @@ def view_row(order: Order, **overrides):
         "payment_status": None,
         "mpesa_receipt_number": None,
         "result_desc": None,
+        "payment_phone_number": None,
         "payment_stk_phone_number": None,
         "payment_completed_at": None,
         "payment_attempts": 0,

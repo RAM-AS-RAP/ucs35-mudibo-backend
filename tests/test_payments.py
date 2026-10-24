@@ -83,13 +83,29 @@ def install(application, db: FakeDB, user=None, client=None) -> None:
     application.dependency_overrides[get_daraja_client] = lambda: client
 
 
-def pay_db(buyer, order=None, *, db_now=NOW, open_payments=(), attempts=0, recent=0, view=None, lists=()):
-    """Script a full pay request: phase 1 checks and insert, phase 3 locks, and the final order view."""
+def pay_db(
+    buyer,
+    order=None,
+    *,
+    db_now=NOW,
+    open_payments=(),
+    attempts=0,
+    recent=0,
+    buyer_recent=0,
+    used_phones=(),
+    view=None,
+    lists=(),
+):
+    """Script a full pay request: phase 1 checks, limits and insert, phase 3 locks, and the final order view.
+
+    Phase 1 reads, in order: the replay lookup, the locked order, the clock, the open payments, the
+    attempts on the order, the per number count, the per buyer count, and the numbers used today.
+    """
     order = order or make_order(buyer.id)
     db = FakeDB(
-        scalars=[None, order, db_now, attempts, recent, order, lambda db: db.payments[-1]],
+        scalars=[None, order, db_now, attempts, recent, buyer_recent, order, lambda db: db.payments[-1]],
         lists=[list(open_payments), *lists],
-        results=[FakeResult(mapping_rows=[view or view_row(order)])],
+        results=[FakeResult(rows=list(used_phones)), FakeResult(mapping_rows=[view or view_row(order)])],
     )
     return db, order
 
@@ -155,13 +171,14 @@ async def test_missing_or_invalid_idempotency_key_is_422(api_client, application
     assert db.statements == []
 
 
-async def test_a_request_body_is_rejected(api_client, application, settings):
+async def test_a_body_with_other_fields_is_rejected(api_client, application, settings):
+    # Only phone_number may be sent; the amount and order data always come from the server.
     db = FakeDB()
     daraja = FakeDaraja(db)
     install(application, db, make_buyer(), daraja)
     response = await post_pay(api_client, uuid4(), json={"amount": 1, "phone_number": "254700000001"})
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "body_not_allowed"
+    assert response.json()["error"]["code"] == "validation_error"
     assert db.statements == [] and daraja.pushes == []
 
 
@@ -253,12 +270,16 @@ async def test_three_attempts_are_the_maximum(api_client, application, settings)
 async def test_five_attempts_on_one_phone_in_an_hour_is_429(api_client, application, settings):
     buyer = make_buyer()
     order = make_order(buyer.id)
-    db = FakeDB(scalars=[None, order, NOW, 0, 5], lists=[[]])
+    oldest = NOW - timedelta(minutes=20)
+    db = FakeDB(scalars=[None, order, NOW, 0, 5, oldest], lists=[[]])
     install(application, db, buyer, FakeDaraja(db))
     response = await post_pay(api_client, order.id)
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "too_many_payment_attempts"
-    assert "payments.stk_phone_number = " in db.statements[-1]
+    assert response.headers["Retry-After"] == str(40 * 60)
+    # The rule counts the entered number, not the number the prompt is sent to.
+    count = db.statements[-2]
+    assert "payments.phone_number = " in count and "stk_phone_number" not in count
 
 
 @pytest.mark.parametrize(
@@ -318,7 +339,10 @@ async def test_a_new_attempt_is_allowed_after_a_cancelled_payment(api_client, ap
     assert response.status_code == 202, response.text
 
 
-@pytest.mark.parametrize(("target", "expected_phone"), [("registered", BUYER_PHONE), ("test_msisdn", TEST_MSISDN)])
+@pytest.mark.parametrize(
+    ("target", "expected_phone"),
+    [("entered", BUYER_PHONE), ("registered", BUYER_PHONE), ("test_msisdn", TEST_MSISDN)],
+)
 async def test_payment_values_come_from_the_server(
     api_client, application, monkeypatch, rematch_calls, target, expected_phone
 ):
@@ -418,9 +442,10 @@ async def test_pay_locks_the_order_before_payments_and_never_a_listing(
     install(application, db, buyer, FakeDaraja(db))
     await post_pay(api_client, order.id)
     statements = db.statements
+    advisory_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock(hashtext(" in sql)
     order_lock = lock_index(statements, "orders")
     payment_lock = lock_index(statements, "payments")
-    assert order_lock < payment_lock
+    assert advisory_lock < order_lock < payment_lock
     # The final order view joins listings to show them, but nothing in the pay flow locks a listing.
     assert not any("produce_listings" in sql and "FOR UPDATE" in sql.upper() for sql in statements)
 
@@ -431,7 +456,7 @@ async def test_a_concurrent_insert_rejected_by_the_partial_index_is_409(api_clie
     error = IntegrityError(
         "insert into payments", {}, Exception('duplicate key value violates "payments_one_open_per_order_idx"')
     )
-    db = FakeDB(scalars=[None, order, NOW, 0, 0], lists=[[]], commit_errors=[error])
+    db = FakeDB(scalars=[None, order, NOW, 0, 0, 0], lists=[[]], results=[FakeResult()], commit_errors=[error])
     daraja = FakeDaraja(db)
     install(application, db, buyer, daraja)
     response = await post_pay(api_client, order.id)
@@ -998,10 +1023,11 @@ async def test_secrets_never_reach_logs_events_responses_or_errors(api_client, a
     inserted = lambda db: db.payments[-1]  # noqa: E731
     db = FakeDB(
         scalars=[
-            # successful pay: phase 1, phase 3 locks, rematch lookup
+            # successful pay: phase 1 (with the per number and per buyer counts), phase 3 locks, rematch lookup
             None,
             order,
             NOW,
+            0,
             0,
             0,
             order,
@@ -1017,15 +1043,18 @@ async def test_secrets_never_reach_logs_events_responses_or_errors(api_client, a
             NOW,
             0,
             0,
+            0,
             failing,
             inserted,
         ],
         lists=[[], []],
         results=[
+            FakeResult(),  # numbers the buyer used today: none yet
             FakeResult(),  # rematch after the successful pay: no early callbacks to attach
             FakeResult(mapping_rows=[view_row(order)]),
             FakeResult(),
             lambda db: FakeResult(rows=[(db.payments[0].id, order.id)]),
+            lambda db: FakeResult(rows=[(BUYER_PHONE, NOW)]),  # numbers used today, before the failing pay
         ],
     )
     install(application, db, buyer, client)

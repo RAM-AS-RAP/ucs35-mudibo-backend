@@ -181,9 +181,11 @@ async def test_payment_flow_logs_no_daraja_secret_token_or_phone(
     buyer = make_buyer()
     order = make_order(buyer.id)
     db = FakeDB(
-        scalars=[None, order, NOW, 0, 0, order, lambda db: db.payments[-1]],
+        # replay, order, clock, attempts, per number, per buyer; phase 3 locks
+        scalars=[None, order, NOW, 0, 0, 0, order, lambda db: db.payments[-1]],
         lists=[[]],
-        results=[FakeResult(mapping_rows=[view_row(order)])],
+        # distinct numbers used today, then the order view
+        results=[FakeResult(), FakeResult(mapping_rows=[view_row(order)])],
     )
 
     async def request_session():

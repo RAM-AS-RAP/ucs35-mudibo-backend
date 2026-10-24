@@ -38,7 +38,7 @@ from app.schemas.admin import (
     ResolveOrderRequest,
 )
 from app.schemas.common import Pagination
-from app.utils.phone import mask_phone
+from app.utils.phone import mask_phone, mask_phone_or_none
 from app.utils.search import contains_pattern, prefix_pattern
 
 logger = logging.getLogger(__name__)
@@ -202,6 +202,7 @@ def _payment_out(payment: Payment) -> AdminOrderPaymentOut:
         id=payment.id,
         status=str(payment.status),
         amount=payment.amount,
+        phone_masked=mask_phone_or_none(payment.phone_number),
         stk_target_masked=mask_phone(payment.stk_phone_number),
         mpesa_receipt_number=payment.mpesa_receipt_number,
         result_code=payment.result_code,
@@ -347,6 +348,7 @@ PAYMENT_SELECT = """
         buyer.name as buyer_name,
         p.amount,
         p.status::text as status,
+        p.phone_number,
         p.stk_phone_number,
         p.mpesa_receipt_number,
         p.result_code,
@@ -422,6 +424,7 @@ async def list_payments(
             buyer_name=row["buyer_name"],
             amount=int(row["amount"]),
             status=row["status"],
+            phone_masked=mask_phone_or_none(row.get("phone_number")),
             stk_target_masked=mask_phone(row["stk_phone_number"]),
             mpesa_receipt_number=row["mpesa_receipt_number"],
             result_code=row["result_code"],
