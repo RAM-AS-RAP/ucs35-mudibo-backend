@@ -84,10 +84,16 @@ PAYMENT_STATUS_MESSAGES = {
 
 
 class OrderPaymentSummary(BaseModel):
-    """Latest payment of an order, without identifiers, full phone numbers, or callback data."""
+    """Latest payment of an order, without identifiers, full phone numbers, or callback data.
+
+    ``phone_masked`` is the number the buyer entered for the payment and ``stk_target_masked`` the
+    number the prompt was sent to (the sandbox test number in ``test_msisdn`` mode); both keep only
+    their last three digits.
+    """
 
     status: str
     status_message: str
+    phone_masked: str | None
     stk_target_masked: str
     mpesa_receipt_number: str | None
     result_desc: str | None

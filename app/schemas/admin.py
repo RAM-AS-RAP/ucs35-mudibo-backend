@@ -117,6 +117,7 @@ class AdminOrderPaymentOut(BaseModel):
     id: UUID
     status: str
     amount: int
+    phone_masked: str | None
     stk_target_masked: str
     mpesa_receipt_number: str | None
     result_code: int | None
@@ -160,6 +161,7 @@ class AdminPaymentOut(BaseModel):
     buyer_name: str
     amount: int
     status: str
+    phone_masked: str | None
     stk_target_masked: str
     mpesa_receipt_number: str | None
     result_code: int | None

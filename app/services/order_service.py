@@ -44,7 +44,7 @@ from app.schemas.order import (
     OrderPaymentSummary,
 )
 from app.services import listing_service, payment_service
-from app.utils.phone import mask_phone
+from app.utils.phone import mask_phone, mask_phone_or_none
 
 REFERENCE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 REFERENCE_ATTEMPTS = 5
@@ -185,6 +185,7 @@ ORDER_VIEW_COLUMNS = """
     latest_payment.status as payment_status,
     latest_payment.mpesa_receipt_number,
     latest_payment.result_desc,
+    latest_payment.phone_number as payment_phone_number,
     latest_payment.stk_phone_number as payment_stk_phone_number,
     latest_payment.completed_at as payment_completed_at,
     payment_counts.attempts as payment_attempts,
@@ -197,7 +198,7 @@ ORDER_VIEW_JOINS = """
     join public.produce_listings as l on l.id = o.listing_id
     join public.users as seller on seller.id = l.farmer_id
     left join lateral (
-        select p.status, p.mpesa_receipt_number, p.result_desc, p.stk_phone_number, p.completed_at
+        select p.status, p.mpesa_receipt_number, p.result_desc, p.phone_number, p.stk_phone_number, p.completed_at
         from public.payments as p
         where p.order_id = o.id
         order by p.created_at desc, p.id desc
@@ -257,6 +258,7 @@ def _order_out(row: Any, viewer: User) -> OrderOut:
         payment = OrderPaymentSummary(
             status=payment_status,
             status_message=PAYMENT_STATUS_MESSAGES.get(payment_status, payment_status),
+            phone_masked=mask_phone_or_none(row.get("payment_phone_number")),
             stk_target_masked=mask_phone(row.get("payment_stk_phone_number")),
             mpesa_receipt_number=row["mpesa_receipt_number"],
             result_desc=row["result_desc"],

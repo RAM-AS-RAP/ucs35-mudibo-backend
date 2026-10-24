@@ -108,6 +108,7 @@ def view_row(**overrides):
         "payment_status": None,
         "mpesa_receipt_number": None,
         "result_desc": None,
+        "payment_phone_number": None,
         "payment_stk_phone_number": None,
         "payment_completed_at": None,
         "payment_attempts": 0,
@@ -692,6 +693,7 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
         payment_status="completed",
         mpesa_receipt_number="SBX123",
         result_desc="The service request is processed successfully.",
+        payment_phone_number="254712345678",
         payment_stk_phone_number="254708374149",
         payment_completed_at=FIXED_NOW,
         payment_attempts=2,
@@ -700,6 +702,7 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
     assert payload["payment"] == {
         "status": "completed",
         "status_message": "Payment received",
+        "phone_masked": "254*******678",
         "stk_target_masked": "254*******149",
         "mpesa_receipt_number": "SBX123",
         "result_desc": "The service request is processed successfully.",
@@ -709,6 +712,7 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
     assert set(OrderPaymentSummary.model_fields) == {
         "status",
         "status_message",
+        "phone_masked",
         "stk_target_masked",
         "mpesa_receipt_number",
         "result_desc",
@@ -716,7 +720,8 @@ def test_payment_summary_never_exposes_identifiers_or_phones():
         "attempts",
     }
     text = json.dumps(payload)
-    for forbidden in ("idempotency_key", "checkout_request_id", "merchant_request_id", "phone", "254708374149"):
+    forbidden_values = ("idempotency_key", "checkout_request_id", "merchant_request_id", "phone_number")
+    for forbidden in (*forbidden_values, "254708374149", "254712345678", "0712345678"):
         assert forbidden not in text
     assert payload["note"] == ORDER_NOTE
     assert payload["unit_price"] == 112.56

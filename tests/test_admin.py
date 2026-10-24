@@ -454,6 +454,7 @@ async def test_order_detail_never_exposes_payment_secrets(api_client, applicatio
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["payments"][0]["stk_target_masked"] == "254*******678"
+    assert body["payments"][0]["phone_masked"] == "254*******678"
     for forbidden in ("secret-idempotency-key", "merchant-xyz", "254712345678", "idempotency", "merchant"):
         assert forbidden not in response.text
 
@@ -473,6 +474,7 @@ async def test_payments_list_masks_targets_and_numbers_attempts():
         "buyer_name": "Buyer Ann",
         "amount": 114,
         "status": "completed",
+        "phone_number": "254712345321",
         "stk_phone_number": "254708374149",
         "mpesa_receipt_number": "SBX1",
         "result_code": 0,
@@ -489,8 +491,10 @@ async def test_payments_list_masks_targets_and_numbers_attempts():
     )
     item = page.items[0]
     assert (item.stk_target_masked, item.attempt_number) == ("254*******149", 2)
+    assert item.phone_masked == "254*******321"
     dumped = json.dumps(item.model_dump(mode="json"))
     assert "254708374149" not in dumped and "idempotency" not in dumped and "merchant" not in dumped
+    assert "254712345321" not in dumped
     assert "Africa/Nairobi" in db.statements[1]
 
 
