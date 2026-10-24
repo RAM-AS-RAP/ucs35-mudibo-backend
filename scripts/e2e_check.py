@@ -24,7 +24,10 @@ Variables (read from the process environment):
 Payment modes. ``simulate`` asks the server for a real sandbox STK push (start the server with
 ``MPESA_STK_TARGET=test_msisdn`` so it goes to the sandbox test number), then posts a simulated success
 callback itself. Daraja may later send its own callback for the same request; the server treats it as a
-duplicate. ``prompt`` waits up to 150 seconds for someone to approve the prompt on the phone.
+duplicate. ``prompt`` waits up to 150 seconds for someone to approve the prompt on the phone. Both send
+the buyer's number as ``{"phone_number": ...}``; ``simulate`` also replays the key with the same number
+(same result), with a different number (409 ``idempotency_key_reused``), and makes one call with no body
+to cover the profile number fallback.
 
 Safety: the script refuses to run when ``APP_ENV`` is ``production`` and, unless ``E2E_ALLOW_REMOTE=1``,
 when the base URL is not localhost. It never prints tokens, passwords, codes or full phone numbers. Test
@@ -106,6 +109,11 @@ class Actor:
 
 def random_phone() -> str:
     return "2541" + "".join(secrets.choice("0123456789") for _ in range(8))
+
+
+def different_phone(phone: str) -> str:
+    """Another valid number that differs from ``phone`` in its last digit."""
+    return phone[:-1] + ("1" if phone[-1] != "1" else "2")
 
 
 def random_password() -> str:
@@ -536,12 +544,15 @@ class E2ERun:
         else:
             self.results.append(Result("payments", "payment", FAIL, "E2E_PAYMENTS must be skip, simulate or prompt"))
 
-    async def pay(self, key: str) -> dict[str, Any]:
+    async def pay(
+        self, key: str, phone: str | None = None, status: int = 202, code: str | None = None
+    ) -> dict[str, Any]:
+        """POST /pay with the M-Pesa number in the body, or with no body at all when ``phone`` is None."""
         assert self.order is not None
-        return expect(
-            await self.api("POST", f"/orders/{self.order['id']}/pay", self.buyer, headers={"Idempotency-Key": key}),
-            202,
-        )
+        kwargs: dict[str, Any] = {"headers": {"Idempotency-Key": key}}
+        if phone is not None:
+            kwargs["json"] = {"phone_number": phone}
+        return expect(await self.api("POST", f"/orders/{self.order['id']}/pay", self.buyer, **kwargs), status, code)
 
     async def simulated_payment(self) -> str:
         assert self.order is not None
@@ -550,10 +561,17 @@ class E2ERun:
         if not database_url or not token:
             raise StepSkipped("simulate needs DATABASE_URL and MPESA_CALLBACK_TOKEN")
         key = str(uuid4())
-        first = await self.pay(key)
-        replay = await self.pay(key)
-        if replay["payment"]["attempts"] != first["payment"]["attempts"]:
-            raise StepFailed("replaying the Idempotency-Key created another payment")
+        first = await self.pay(key, self.buyer.phone)
+        if first["payment"]["phone_masked"] != self.buyer.masked_phone:
+            raise StepFailed("the payment does not show the entered number (masked)")
+        replay = await self.pay(key, self.buyer.phone)
+        if replay["payment"]["attempts"] != first["payment"]["attempts"] or replay["status"] != first["status"]:
+            raise StepFailed("replaying the Idempotency-Key with the same number created another payment")
+        await self.pay(key, different_phone(self.buyer.phone), 409, "idempotency_key_reused")
+        # A new key with no body resolves the number from the profile (the temporary fallback). The open
+        # payment then answers payment_in_progress, so no second prompt is sent and no attempt is used;
+        # a broken fallback would answer 422 phone_required instead.
+        await self.pay(str(uuid4()), None, 409, "payment_in_progress")
         checkout_id, amount = await read_latest_payment(database_url, self.order["id"])
         if not checkout_id:
             raise StepFailed("the payment has no checkout request id")
@@ -588,12 +606,15 @@ class E2ERun:
         again = expect(await self.api("GET", f"/orders/{self.order['id']}", self.buyer), 200)
         if again["status"] != "paid" or again["payment"]["attempts"] != paid["payment"]["attempts"]:
             raise StepFailed("a repeated callback changed the order")
-        return "paid via simulated callback; replay and duplicate callback changed nothing"
+        return (
+            "paid via simulated callback; same-number replay and duplicate callback changed nothing, "
+            "a different number was refused and the no-body fallback resolved"
+        )
 
     async def prompt_payment(self) -> str:
         if os.environ.get("E2E_CONFIRM_REAL_PROMPT") != "yes":
             raise StepSkipped("set E2E_CONFIRM_REAL_PROMPT=yes; the prompt may reach a real phone")
-        started = await self.pay(str(uuid4()))
+        started = await self.pay(str(uuid4()), self.buyer.phone)
         print(f"Approve the prompt on the phone ({started['payment']['stk_target_masked']}).", flush=True)
         await self.poll_until_paid(PROMPT_TIMEOUT_SECONDS)
         return "paid after the prompt was approved"
