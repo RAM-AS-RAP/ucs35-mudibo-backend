@@ -558,6 +558,17 @@
             ],
             "title": "Mpesa Receipt Number"
           },
+          "phone_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Masked"
+          },
           "result_code": {
             "anyOf": [
               {
@@ -593,6 +604,7 @@
           "id",
           "status",
           "amount",
+          "phone_masked",
           "stk_target_masked",
           "mpesa_receipt_number",
           "result_code",
@@ -681,6 +693,17 @@
             "title": "Order Status",
             "type": "string"
           },
+          "phone_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Masked"
+          },
           "result_code": {
             "anyOf": [
               {
@@ -720,6 +743,7 @@
           "buyer_name",
           "amount",
           "status",
+          "phone_masked",
           "stk_target_masked",
           "mpesa_receipt_number",
           "result_code",
@@ -1665,7 +1689,7 @@
         "type": "object"
       },
       "OrderPaymentSummary": {
-        "description": "Latest payment of an order, without identifiers, full phone numbers, or callback data.",
+        "description": "Latest payment of an order, without identifiers, full phone numbers, or callback data.\n\n``phone_masked`` is the number the buyer entered for the payment and ``stk_target_masked`` the\nnumber the prompt was sent to (the sandbox test number in ``test_msisdn`` mode); both keep only\ntheir last three digits.",
         "properties": {
           "attempts": {
             "title": "Attempts",
@@ -1694,6 +1718,17 @@
             ],
             "title": "Mpesa Receipt Number"
           },
+          "phone_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Masked"
+          },
           "result_desc": {
             "anyOf": [
               {
@@ -1721,6 +1756,7 @@
         "required": [
           "status",
           "status_message",
+          "phone_masked",
           "stk_target_masked",
           "mpesa_receipt_number",
           "result_desc",
@@ -1788,6 +1824,27 @@
           "new_password"
         ],
         "title": "PasswordResetConfirmRequest",
+        "type": "object"
+      },
+      "PayRequest": {
+        "additionalProperties": false,
+        "description": "Optional body of ``POST /orders/{id}/pay``: the M-Pesa number to send the prompt to.",
+        "properties": {
+          "phone_number": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "minLength": 3,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone Number"
+          }
+        },
+        "title": "PayRequest",
         "type": "object"
       },
       "PaymentEventList": {
@@ -5275,7 +5332,7 @@
     },
     "/api/v1/orders/{order_id}/pay": {
       "post": {
-        "description": "Send an M-Pesa STK prompt for the buyer's order; amount and phone always come from the server.",
+        "description": "Send an M-Pesa STK prompt for the buyer's order to the number entered for this payment.\n\nThe body is optional: none, ``{}``, or ``{\"phone_number\": \"...\"}``. The amount always comes from\nthe server.",
         "operationId": "pay_order_api_v1_orders__order_id__pay_post",
         "parameters": [
           {
@@ -5305,6 +5362,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/PayRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "202": {
             "content": {

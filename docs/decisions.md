@@ -37,7 +37,12 @@
 - An STK Push Query result has no receipt and no amount, so a payment completed by a query keeps a null receipt and skips the amount check.
 - A late payment on an expired or cancelled order makes the order `needs_reconciliation`, never `paid`, because its stock was already restored.
 - At least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (90) seconds must remain before expiry to start a payment.
-- Payment attempts are limited to `MPESA_MAX_ATTEMPTS_PER_ORDER` (3) per order and `MPESA_PHONE_ATTEMPTS_PER_HOUR` (5) per prompt phone per hour.
+- Payment attempts are limited to `MPESA_MAX_ATTEMPTS_PER_ORDER` (3) per order and `MPESA_PHONE_ATTEMPTS_PER_HOUR` (5) per entered number per hour.
+- The M-Pesa number is entered per payment (`POST /orders/{id}/pay` body) and is never saved to the profile; the profile number is only a temporary fallback.
+- The per number limit counts the entered number (`payments.phone_number`), not `stk_phone_number`, which fixes the shared test number being exhausted for every buyer in `test_msisdn` mode.
+- Per buyer (`MPESA_BUYER_ATTEMPTS_PER_HOUR`, 10) and distinct number (`MPESA_BUYER_DISTINCT_PHONES_PER_DAY`, 3) limits apply because entered numbers are unverified; a per buyer advisory lock taken before the order lock makes them exact across the buyer's orders.
+- `MPESA_STK_TARGET=registered` is a deprecated alias of `entered` (startup warning); `entered` is preferred.
+- A replay of an `Idempotency-Key` with a different number is rejected with 409 `idempotency_key_reused`.
 - The uvicorn access log rewrites `/payments/callback/<token>` to `/payments/callback/***`, so the callback token is never logged.
 - The `payment_failed` order status stays unused; a failed payment leaves the order `pending_payment` until it expires.
 - Production payments are impossible by construction: settings and the Daraja client reject any non-sandbox environment, URL or shortcode, and there is no production option.

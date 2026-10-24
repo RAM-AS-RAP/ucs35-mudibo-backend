@@ -120,7 +120,7 @@ Owning buyer. Returns the cancelled `OrderOut`; stock is returned to the listing
 
 ### POST /api/v1/orders/{order_id}/pay
 
-Owning buyer. `Idempotency-Key` header, empty body. Returns 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent.
+Owning buyer. `Idempotency-Key` header; optional body `{"phone_number": "..."}` (the M-Pesa number for this payment). Returns 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent.
 
 ### POST /api/v1/payments/callback/{token}
 
@@ -379,7 +379,7 @@ Stock is reserved at checkout: the ordered quantity is removed from the listing 
 | `GET /orders/mine` | Buyer | 200 | 422 `validation_error` for an invalid status or pagination. |
 | `GET /orders/{id}` | Owning buyer, admin | 200 | 404 `order_not_found` (another buyer's order and an unknown id give identical bodies). |
 | `POST /orders/{id}/cancel` | Owning buyer | 200 (also for an already cancelled order) | 404 `order_not_found`; 409 `order_not_cancellable` (paid, expired, or any other non-pending status), `payment_in_progress`; 429 `rate_limited` (30 per hour per IP). |
-| `POST /orders/{id}/pay` | Owning buyer | 202 (also for a replay of the same key) | 404 `order_not_found`; 409 `order_not_payable`, `order_expiring` (`reason` `expired` or `too_close`), `payment_in_progress`, `max_attempts_reached`; 422 `idempotency_key_required`, `invalid_idempotency_key`, `body_not_allowed`; 429 `too_many_payment_attempts` or `rate_limited` (10 per minute per IP); 502 `payment_request_failed`; 503 `payments_unavailable`. |
+| `POST /orders/{id}/pay` | Owning buyer | 202 (also for a replay of the same key) | 404 `order_not_found`; 409 `order_not_payable`, `order_expiring` (`reason` `expired` or `too_close`), `payment_in_progress`, `max_attempts_reached`, `idempotency_key_reused`; 422 `idempotency_key_required`, `invalid_idempotency_key`, `invalid_phone`, `phone_required`, `validation_error`; 429 `too_many_payment_attempts`, `too_many_buyer_payment_attempts`, `too_many_phone_numbers` or `rate_limited` (10 per minute per IP), all with `Retry-After`; 502 `payment_request_failed`; 503 `payments_unavailable`. |
 
 All routes return 401 without a valid token and 403 `forbidden` for other roles. Farmers and admins get 403 on `GET /listings`, `GET /listings/markets` and `GET /listings/{id}`; buyers get 403 on every farmer listing route.
 
@@ -476,7 +476,7 @@ Body (unknown fields are rejected with 422):
 
 - `server_time` is the database time; use it with `expires_at` for a countdown instead of the device clock.
 - `is_expired` is true for a `pending_payment` order whose `expires_at` has passed, even before the expiry job has run.
-- `payment` is null, or the latest payment: `status`, `status_message`, `stk_target_masked` (for example `254*******149`), `mpesa_receipt_number`, `result_desc`, `completed_at`, and `attempts` (number of payment rows). `status_message` is a fixed English text per status: `initiating` "Sending the payment request", `initiated` "Waiting for you to confirm on your phone", `completed` "Payment received", `cancelled` "You cancelled the payment request", `timeout` "The request timed out", `failed` "The payment failed". Payment identifiers, idempotency keys, checkout and merchant request ids, full phone numbers, and callback data are never returned.
+- `payment` is null, or the latest payment: `status`, `status_message`, `phone_masked` (the M-Pesa number the buyer entered for that payment, for example `254*******678`), `stk_target_masked` (the number the prompt was sent to, for example `254*******149`; the same as `phone_masked` unless the server runs with `MPESA_STK_TARGET=test_msisdn`), `mpesa_receipt_number`, `result_desc`, `completed_at`, and `attempts` (number of payment rows). `status_message` is a fixed English text per status: `initiating` "Sending the payment request", `initiated` "Waiting for you to confirm on your phone", `completed` "Payment received", `cancelled` "You cancelled the payment request", `timeout` "The request timed out", `failed` "The payment failed". Payment identifiers, idempotency keys, checkout and merchant request ids, full phone numbers, and callback data are never returned.
 - `can_pay` is true only for the owning buyer, when the order is `pending_payment`, not expired, has at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds left on the database clock, has no open (`initiating` or `initiated`) payment, and has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) payment rows. `can_cancel` is true for the owning buyer when the order is `pending_payment` with no open payment. Both are false for an admin.
 - When the owning buyer reads `GET /orders/{id}`, the latest payment is reconciled first: a stale `initiating` payment is failed, and an `initiated` payment older than `RECONCILE_AFTER_SECONDS` (or a `timeout` payment younger than `MPESA_TIMEOUT_RECONCILE_WINDOW_MINUTES`) is checked with an STK Push Query, at most once every `MPESA_QUERY_MIN_INTERVAL_SECONDS`. A reconciliation failure never fails the request. Admin reads never reconcile.
 
@@ -492,11 +492,25 @@ Cancels the buyer's own `pending_payment` order and returns its quantity to the 
 
 Sends an M-Pesa STK Push prompt for the order through the Safaricom Daraja **sandbox** (shortcode 174379). No real money moves; a `paid` order is a simulated confirmation.
 
-Headers: `Authorization: Bearer <token>` and `Idempotency-Key` (required, 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_`, `-`). The body must be empty. The client never sends an amount, phone number or order data: the amount is the order total and the phone is the buyer's registered number (or the sandbox test number when `MPESA_STK_TARGET=test_msisdn`). Rate limit: 10 per minute per IP.
+Headers: `Authorization: Bearer <token>` and `Idempotency-Key` (required, 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_`, `-`). Rate limit: 10 per minute per IP.
 
-The key is stored scoped to the buyer and order, so it cannot collide with or probe other buyers' keys. Repeating a request with the same key returns 202 with the current order and never sends a second prompt, even after the order has moved on. Use a new key for a new attempt.
+Body (optional): no body, `{}`, or the M-Pesa number to send the prompt to:
 
-The payment can start only when the order is `pending_payment`, at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds remain before `expires_at`, no other payment is open, the order has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) attempts, and the prompt phone has fewer than `MPESA_PHONE_ATTEMPTS_PER_HOUR` (default 5) attempts in the last hour. An `initiating` payment whose request was never sent (older than `MPESA_STALE_INITIATING_SECONDS`, default 60) is failed and does not block a new attempt.
+```json
+{ "phone_number": "0712 345 678" }
+```
+
+`phone_number` is a string of 3 to 20 characters (after trimming); `07...`, `01...`, `+2547...`, `2547...` and `2541...` are accepted, with spaces or dashes, and stored as `254XXXXXXXXX`. Any other field, a body that is not a JSON object, or a value of the wrong length gives 422 `validation_error`. A number that is not a valid Safaricom number gives 422 `invalid_phone`. Without a number the buyer's profile phone number is used while accounts still have one; when there is none the answer is 422 `phone_required`. The entered number is used for this payment only and is never saved to the profile. The client never sends an amount or order data: the amount is the order total. The prompt goes to the entered number, or to the sandbox test number when `MPESA_STK_TARGET=test_msisdn`.
+
+The key is stored scoped to the buyer and order, so it cannot collide with or probe other buyers' keys. Repeating a request with the same key returns 202 with the current order and never sends a second prompt, even after the order has moved on, when the replay has no number or the same number (any accepted format). A replay with a different number gives 409 `idempotency_key_reused`. Use a new key for a new attempt.
+
+The payment can start only when the order is `pending_payment`, at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds remain before `expires_at`, no other payment is open, and the order has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) attempts. An `initiating` payment whose request was never sent (older than `MPESA_STALE_INITIATING_SECONDS`, default 60) is failed and does not block a new attempt. After those checks three limits apply, measured on the database clock:
+
+- the entered number has fewer than `MPESA_PHONE_ATTEMPTS_PER_HOUR` (default 5) payments in the last hour;
+- the buyer has fewer than `MPESA_BUYER_ATTEMPTS_PER_HOUR` (default 10) payments, across all orders, in the last hour;
+- the entered number was already used by the buyer in the last 24 hours, or the buyer has used fewer than `MPESA_BUYER_DISTINCT_PHONES_PER_DAY` (default 3) different numbers in that time.
+
+Each limit answers 429 with `Retry-After` in whole seconds: for an hourly limit, the time until the oldest counted payment leaves the hour; for the distinct numbers limit, the time until the first of the buyer's numbers leaves the 24 hours.
 
 Response 202 (`OrderOut` plus two fields):
 
@@ -510,6 +524,7 @@ Response 202 (`OrderOut` plus two fields):
 	"payment": {
 		"status": "initiated",
 		"status_message": "Waiting for you to confirm on your phone",
+		"phone_masked": "254*******678",
 		"stk_target_masked": "254*******149",
 		"mpesa_receipt_number": null,
 		"result_desc": null,
@@ -521,7 +536,7 @@ Response 202 (`OrderOut` plus two fields):
 }
 ```
 
-(Other `OrderOut` fields are omitted above.) Then poll `GET /orders/{id}` until the payment is final.
+(Other `OrderOut` fields are omitted above. The example ran with `MPESA_STK_TARGET=test_msisdn`, so the prompt went to the sandbox test number.) Then poll `GET /orders/{id}` until the payment is final.
 
 Errors:
 
@@ -532,9 +547,14 @@ Errors:
 | 409 | `order_expiring` | Fewer than 90 seconds remain; `reason` is `expired` or `too_close`. |
 | 409 | `payment_in_progress` | Another payment for the order is `initiating` or `initiated`. |
 | 409 | `max_attempts_reached` | The order already has the maximum number of payment attempts. |
+| 409 | `idempotency_key_reused` | The key was already used with a different number ("This request was already used with a different number. Start a new payment attempt."). |
 | 422 | `idempotency_key_required` / `invalid_idempotency_key` | Missing or malformed `Idempotency-Key`. |
-| 422 | `body_not_allowed` | The request had a body. |
-| 429 | `too_many_payment_attempts` | Too many prompts to the same phone in the last hour. |
+| 422 | `invalid_phone` | The number is not a valid Safaricom number ("Enter a valid Safaricom number, for example 0712 345 678."). |
+| 422 | `phone_required` | No number in the body and none on the profile ("Enter the M-Pesa number to send the payment prompt to."). |
+| 422 | `validation_error` | Unknown body field, a body that is not a JSON object, or a `phone_number` outside 3 to 20 characters. |
+| 429 | `too_many_payment_attempts` | The entered number has `MPESA_PHONE_ATTEMPTS_PER_HOUR` payments in the last hour ("Too many payment attempts for this phone number. Please try again later."). |
+| 429 | `too_many_buyer_payment_attempts` | The buyer has `MPESA_BUYER_ATTEMPTS_PER_HOUR` payments in the last hour ("You have made too many payment attempts. Please try again later."). |
+| 429 | `too_many_phone_numbers` | A new number after `MPESA_BUYER_DISTINCT_PHONES_PER_DAY` different numbers in 24 hours ("You have used too many different phone numbers today. Please try again tomorrow or use one you already used."). |
 | 429 | `rate_limited` | More than 10 requests per minute from one IP. |
 | 502 | `payment_request_failed` | Daraja rejected the request or did not answer in time ("Could not start the M-Pesa prompt. Please try again."). After a timeout the prompt may still have arrived, so a duplicate prompt is possible in the sandbox. |
 | 503 | `payments_unavailable` | Payment settings are missing or `MPESA_CALLBACK_BASE_URL` is not HTTPS. |
@@ -549,7 +569,7 @@ All routes are under `/api/v1/admin` and require an admin account; the role is r
 
 Rate limits per IP: the four invite routes 10 per hour each; `POST /admin/email/test` 5 per hour; disable, enable, listing removal and order resolution 30 per hour (429 `rate_limited`).
 
-No route ever returns a credential. New admins are invited by an emailed code and choose their own password; anyone who forgets a password resets it by email (see [Invites and password reset](#invites-and-password-reset)). Admin responses never contain password hashes, codes or code hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes; invite routes show masked emails (`g***@e***.com`) and phone numbers.
+No route ever returns a credential. New admins are invited by an emailed code and choose their own password; anyone who forgets a password resets it by email (see [Invites and password reset](#invites-and-password-reset)). Admin responses never contain password hashes, codes or code hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (entered numbers and payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes; invite routes show masked emails (`g***@e***.com`) and phone numbers.
 
 ### Status and error codes
 
@@ -685,7 +705,7 @@ Listings of a disabled farmer are hidden from buyers (`GET /listings` excludes t
 
 `reconciliation` is set only for `needs_reconciliation` orders, from the latest `error` payment event that records `order_status_before`. Reasons: `late_success_after_expiry`, `success_on_closed_order`, `success_on_closed_payment`, `amount_mismatch`.
 
-`GET /admin/orders/{id}` adds `payments` (each `id, status, amount, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at`) and `resolution` (`{action, note, admin_name, created_at}` from the latest `admin_action` event) when one exists.
+`GET /admin/orders/{id}` adds `payments` (each `id, status, amount, phone_masked, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at`) and `resolution` (`{action, note, admin_name, created_at}` from the latest `admin_action` event) when one exists.
 
 `POST /admin/orders/{id}/resolve` body, unknown fields rejected:
 
@@ -702,7 +722,31 @@ Listings of a disabled farmer are hidden from buyers (`GET /listings` excludes t
 
 A removed listing is never changed. Payment rows are left as they are; a voided sale's refund is arranged outside the platform. The resolution is recorded as an `admin_action` payment event in the same transaction, and the response is the order detail with `resolution`.
 
-`GET /admin/payments` filters by `status`, `order_reference` (exact), `environment` (`sandbox` or `production`), and `created_from` / `created_to` (dates in Africa/Nairobi). Items: `id, order_id, order_reference, order_status, buyer_name, amount, status, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at, attempt_number`.
+`GET /admin/payments` filters by `status`, `order_reference` (exact), `environment` (`sandbox` or `production`), and `created_from` / `created_to` (dates in Africa/Nairobi). Items: `id, order_id, order_reference, order_status, buyer_name, amount, status, phone_masked, stk_target_masked, mpesa_receipt_number, result_code, result_desc, environment, created_at, completed_at, callback_received_at, attempt_number`.
+
+`phone_masked` is the number the buyer entered for that payment and `stk_target_masked` the number the prompt was sent to (the sandbox test number with `MPESA_STK_TARGET=test_msisdn`); both keep only their last three digits. One item, from a server running with `test_msisdn`:
+
+```json
+{
+	"id": "5b0e8f1c-2f7e-4a8e-9a43-0c2b1d7e9f10",
+	"order_id": "123e4567-e89b-12d3-a456-426614174009",
+	"order_reference": "K7QX2MPA",
+	"order_status": "paid",
+	"buyer_name": "Buyer Ann",
+	"amount": 114,
+	"status": "completed",
+	"phone_masked": "254*******678",
+	"stk_target_masked": "254*******149",
+	"mpesa_receipt_number": "SBX1A2B3C4",
+	"result_code": 0,
+	"result_desc": "The service request is processed successfully.",
+	"environment": "sandbox",
+	"created_at": "2026-10-15T09:00:00Z",
+	"completed_at": "2026-10-15T09:00:40Z",
+	"callback_received_at": "2026-10-15T09:00:40Z",
+	"attempt_number": 1
+}
+```
 
 `GET /admin/payments/{id}/events` returns `{payment_id, items, limit}` where each item is `{id, event_type, checkout_request_id, payload, created_at}`, oldest first, at most 100. Payloads were redacted when stored and are returned unchanged.
 

@@ -45,7 +45,7 @@ Every error body has this shape (some codes add `reason`, `fields`/`details`, `e
 
 - Branch on `code`, never on `message` (messages may change).
 - Every response has an `X-Request-ID` header, and errors repeat it as `request_id`. Show it in error dialogs ("Reference: …") so users can quote it to support. The client may send its own `X-Request-ID` (a UUID) to correlate logs.
-- **429** (`rate_limited`, `too_many_payment_attempts`, `resend_cooldown`) and **503** (`service_unavailable`, `busy`) include `Retry-After` in seconds. Disable the action and retry automatically at most once after that many seconds; for 503 `busy` one silent retry is fine.
+- **429** (`rate_limited`, `too_many_payment_attempts`, `too_many_buyer_payment_attempts`, `too_many_phone_numbers`, `resend_cooldown`) and **503** (`service_unavailable`, `busy`) include `Retry-After` in seconds. Disable the action and retry automatically at most once after that many seconds; for 503 `busy` one silent retry is fine.
 - **422 `validation_error`** has `fields` (field names) and `details` (`[{field, message}]`); highlight those fields.
 
 Suggested user messages:
@@ -88,7 +88,12 @@ Suggested user messages:
 | `payment_in_progress` | 409 | "A payment is already in progress. Check your phone." |
 | `max_attempts_reached` | 409 | "Too many payment attempts for this order. Please place a new order." |
 | `idempotency_key_required` / `invalid_idempotency_key` | 422 | "Something went wrong. Please try again." (client bug) |
-| `too_many_payment_attempts` | 429 | "Too many payment requests to this phone. Please try later." |
+| `invalid_phone` | 422 | "Enter a valid Safaricom number, for example 0712 345 678." (show it on the number field) |
+| `phone_required` | 422 | "Enter the M-Pesa number to send the payment prompt to." (show it on the number field) |
+| `idempotency_key_reused` | 409 | "This request was already used with a different number. Start a new payment attempt." Generate a new key and send again. |
+| `too_many_payment_attempts` | 429 | "Too many payment attempts for this phone number. Please try again later." |
+| `too_many_buyer_payment_attempts` | 429 | "You have made too many payment attempts. Please try again later." |
+| `too_many_phone_numbers` | 429 | "You have used too many different phone numbers today. Please try again tomorrow or use one you already used." |
 | `payment_request_failed` | 502 | "Could not start the M-Pesa prompt. Please try again." |
 | `payments_unavailable` | 503 | "Payments are not available right now." |
 | `invalid_or_expired_code` | 400 | "The code is invalid or has expired." |
@@ -157,7 +162,11 @@ Buyers never see prices or forecasts (403). Farmers never see the buyer browse s
 
 1. `POST /orders` with `{"listing_id": "...", "quantity": "2.5"}` reserves stock and returns the order (`OrderOut`). Show `total_amount` from the response.
 2. Countdown: compute the remaining time as `expires_at - server_time` from the response, then count down locally. Never use the device clock alone, because it may be wrong.
-3. Pay: `POST /orders/{id}/pay` with an **empty body** and header `Idempotency-Key: <UUID>`. Generate **one new UUID per click** on "Pay". If that request fails at the network level or times out, retry with the **same** key. A replay returns the same 202 and never sends a second prompt. The 202 response has `message` ("Check your phone and enter your M-Pesa PIN.") and `prompt` (the masked phone the prompt went to). Show both.
+3. Pay: ask for the M-Pesa number on the pay screen, then `POST /orders/{id}/pay` with `{"phone_number": "<as typed>"}` and header `Idempotency-Key: <UUID>`. Accept `07…`, `01…`, `+254…` or `254…`, with spaces or dashes; the server normalises it. Generate **one new UUID per click** on "Pay". If that request fails at the network level or times out, retry with the **same** key and the **same** number. A replay returns the same 202 and never sends a second prompt; a replay with a different number gives 409 `idempotency_key_reused`, so a changed number always needs a new key. The 202 response has `message` ("Check your phone and enter your M-Pesa PIN.") and `prompt` (the masked phone the prompt went to). Show both.
+   - The body is optional for now: without it (or with `{}`) the profile phone number is used while accounts still have one. Once phone numbers are removed from accounts the field becomes effectively required (422 `phone_required` without it), so always send it.
+   - The number is used for that payment only and is not saved to the profile. Prefilling the field from the last number used on this device is fine.
+   - `payment.phone_masked` is the entered number and `payment.stk_target_masked` the number the prompt went to (the sandbox test number on a test server), both masked to the last 3 digits. Either is `null`/absent only when there is no payment (`payment` is `null`).
+   - 422 `invalid_phone` or `phone_required` belong on the number field. The three payment 429 codes carry `Retry-After`; disable Pay for that long.
 4. Poll `GET /orders/{id}` **every 3 seconds for up to 150 seconds**. Stop as soon as the order status is final, or the latest payment status is final while the order is still `pending_payment`.
 5. Show the `note` from the order response. Payments run in the Safaricom sandbox, a paid order is a simulated confirmation, and delivery is arranged outside the platform.
 

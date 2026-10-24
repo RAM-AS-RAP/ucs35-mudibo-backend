@@ -36,24 +36,52 @@ A `paid` order can never change status (database trigger). The order status `pay
 
 ## Pay flow (`POST /orders/{id}/pay`)
 
+The buyer's M-Pesa number comes with the pay request: the optional body `{"phone_number": "..."}`. Without it, the buyer's profile number is used for now (a temporary fallback that goes away when phone numbers are removed from accounts); with neither the answer is 422 `phone_required`. The entered number is never saved to the user.
+
+Two payment columns hold numbers:
+
+- `payments.phone_number` is the M-Pesa number entered for that payment (normalised to `254XXXXXXXXX`).
+- `payments.stk_phone_number` is the number actually sent to Daraja: the same number for `MPESA_STK_TARGET=entered` and its deprecated alias `registered`, and `MPESA_TEST_MSISDN` for `test_msisdn`.
+
+Both are immutable after insert (database trigger) and are only ever returned masked (`phone_masked`, `stk_target_masked`).
+
 Phase 1, one short transaction with no HTTP call:
 
-1. Check the payment settings (else 503 `payments_unavailable`).
-2. Look up the stored key `"{buyer_id}:{order_id}:{Idempotency-Key}"`. If found, return 202 with the current order (an exact replay; Daraja is not called).
-3. Lock the buyer's order `FOR UPDATE` (else 404).
-4. Require `pending_payment` (else 409 `order_not_payable`).
-5. Require at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` seconds left on the database clock (else 409 `order_expiring`).
-6. Fail a stale `initiating` payment without a checkout id; any other open payment gives 409 `payment_in_progress`.
-7. Check attempts per order and prompts per phone in the last hour.
-8. Insert the payment as `initiating` with the order total and the server-chosen phone, then commit. This releases the order lock before the network call.
+1. Check the payment settings (else 503 `payments_unavailable`), then the `Idempotency-Key` (else 422). A body number that is not a valid Safaricom number gives 422 `invalid_phone`, also for a replay.
+2. Look up the stored key `"{buyer_id}:{order_id}:{Idempotency-Key}"`, without a lock. If found and the request carries a different number than that payment's `phone_number`, return 409 `idempotency_key_reused`. Otherwise return 202 with the current order (an exact replay; Daraja is not called).
+3. Resolve the number (body, else profile, else 422 `phone_required`).
+4. Take the per buyer advisory lock: `SELECT pg_advisory_xact_lock(hashtext(:key))` with key `'pay-buyer:' || buyer.id`. It is transaction scoped, so it works through the transaction pooler and the phase 1 commit or rollback releases it. It makes the per buyer limits exact across all of the buyer's orders.
+5. Lock the buyer's order `FOR UPDATE` (else 404).
+6. Require `pending_payment` (else 409 `order_not_payable`).
+7. Require at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` seconds left on the database clock (else 409 `order_expiring`).
+8. Fail a stale `initiating` payment without a checkout id; any other open payment gives 409 `payment_in_progress`.
+9. Check attempts per order (409 `max_attempts_reached`).
+10. Check the limits below (429 with `Retry-After`). They come after the business checks, so a refused order neither consumes nor reveals a limit.
+11. Insert the payment as `initiating` with the order total, the entered `phone_number` and the `stk_phone_number` chosen by `MPESA_STK_TARGET`, then commit. A rejection by the partial unique index is 409 `payment_in_progress`. The commit releases the advisory and order locks before the network call.
+
+### Limits on the entered number
+
+An entered number is not verified, so a prompt can reach a number the buyer does not own. To limit misuse, three limits apply, all counted on the database clock:
+
+| Limit | Setting (default) | Counts | Error |
+| --- | --- | --- | --- |
+| Per number | `MPESA_PHONE_ATTEMPTS_PER_HOUR` (5) | payments with this `phone_number` in the last hour, from any buyer | 429 `too_many_payment_attempts` |
+| Per buyer | `MPESA_BUYER_ATTEMPTS_PER_HOUR` (10) | the buyer's payments (all orders) in the last hour | 429 `too_many_buyer_payment_attempts` |
+| Distinct numbers | `MPESA_BUYER_DISTINCT_PHONES_PER_DAY` (3) | different `phone_number` values the buyer used in the last 24 hours; a number already used is always allowed | 429 `too_many_phone_numbers` |
+
+The per number limit counts the entered number (`phone_number`), not `stk_phone_number`: in `test_msisdn` mode every payment has the same `stk_phone_number`, so counting it would block every buyer after a few test payments. In `entered` mode the two columns are equal, so real handsets are protected as before.
+
+`Retry-After` is in whole seconds, rounded up and at least 1: for an hourly limit, until the oldest counted payment leaves the hour; for the distinct numbers limit, until the first of the buyer's numbers (its latest payment plus 24 hours) leaves the window.
+
+Limitation: entered numbers are not verified. The limits reduce, but do not prevent, a prompt reaching a number the buyer does not own.
 
 Phase 2, no transaction open:
 
-9. Log a redacted `stk_request` event.
-10. Call STK Push once. It is never retried automatically.
-11. Accepted: lock the order, then the payment, save `checkout_request_id` and `merchant_request_id`, set `initiated`, commit, log `stk_response`, then apply any callback that arrived early (`rematch_orphan_events`). Return 202.
-12. Rejected, failed or timed out: set the payment `failed` (`request_rejected` or `request_unconfirmed`), log an `error` event, return 502 `payment_request_failed`. After a timeout the prompt may still have been sent, so a duplicate prompt is possible in the sandbox.
-13. If the process dies between the phases, the payment stays `initiating`. Reconciliation fails it after `MPESA_STALE_INITIATING_SECONDS`, or the expiry job times it out with the order.
+12. Log a redacted `stk_request` event.
+13. Call STK Push once. It is never retried automatically.
+14. Accepted: lock the order, then the payment, save `checkout_request_id` and `merchant_request_id`, set `initiated`, commit, log `stk_response`, then apply any callback that arrived early (`rematch_orphan_events`). Return 202.
+15. Rejected, failed or timed out: set the payment `failed` (`request_rejected` or `request_unconfirmed`), log an `error` event, return 502 `payment_request_failed`. After a timeout the prompt may still have been sent, so a duplicate prompt is possible in the sandbox.
+16. If the process dies between the phases, the payment stays `initiating`. Reconciliation fails it after `MPESA_STALE_INITIATING_SECONDS`, or the expiry job times it out with the order.
 
 ## Callback flow (`POST /payments/callback/{token}`)
 
@@ -76,7 +104,7 @@ Phase 2, no transaction open:
 
 ## Lock order
 
-Everywhere: **orders, then payments, then listings**. This is the order used by `public.expire_stale_orders()`. Payment code locks an order and then its payment, and never locks a listing. Checkout locks only a listing and then inserts a new order. Cancel locks the order, then the listing.
+Everywhere: **orders, then payments, then listings**. This is the order used by `public.expire_stale_orders()`. Payment code locks an order and then its payment, and never locks a listing. Starting a payment takes the per buyer advisory lock (`pay-buyer:<buyer id>`) before the order lock; no code takes an order lock and then that advisory lock, so they cannot deadlock. Checkout locks only a listing and then inserts a new order. Cancel locks the order, then the listing.
 
 ## Events and secrets
 
@@ -97,11 +125,11 @@ Everywhere: **orders, then payments, then listings**. This is the order used by 
 
 Participants: Buyer, PWA, API, Database, Daraja (sandbox), Phone.
 
-1. Buyer taps "Pay with M-Pesa" on a `pending_payment` order where `can_pay` is true.
-2. PWA → API: `POST /orders/{id}/pay` with the bearer token and a new `Idempotency-Key`, empty body.
-3. API → Database: look up the stored idempotency key (a replay returns 202 with the current order at once, without steps 4 to 9).
-4. API → Database: lock the order (`FOR UPDATE`), check status, time left (database clock), open payments, attempts and per-phone limit.
-5. API → Database: insert payment `initiating` (amount = order total), commit (lock released).
+1. Buyer taps "Pay with M-Pesa" on a `pending_payment` order where `can_pay` is true and enters the M-Pesa number to pay with.
+2. PWA → API: `POST /orders/{id}/pay` with the bearer token, a new `Idempotency-Key`, and `{"phone_number": "0712 345 678"}`.
+3. API → Database: look up the stored idempotency key (a replay with the same or no number returns 202 with the current order at once, without steps 4 to 9; a different number gives 409 `idempotency_key_reused`).
+4. API → Database: take the per buyer advisory lock, lock the order (`FOR UPDATE`), check status, time left (database clock), open payments, attempts, then the per number, per buyer and distinct number limits.
+5. API → Database: insert payment `initiating` (amount = order total, `phone_number` = entered number, `stk_phone_number` per `MPESA_STK_TARGET`), commit (locks released).
 6. API → Database: insert `stk_request` event.
 7. API → Daraja: OAuth token (cached), then STK Push request with `CallBackURL`.
 8. Daraja → API: `ResponseCode "0"`, `CheckoutRequestID`, `MerchantRequestID`.
