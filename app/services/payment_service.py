@@ -2,6 +2,8 @@
 
 Lock order, shared with ``public.expire_stale_orders()`` and the order service: orders, then
 payments, then listings. Payment code locks an order and then its payment, and never locks a listing.
+Starting a payment first takes a per buyer advisory lock (``pay-buyer:<buyer id>``) and only then the
+order row; no code takes an order lock and then that advisory lock, so the two cannot deadlock.
 
 No database transaction is held open while an HTTP request to Daraja is in flight. Payment events
 are written by ``log_event`` in their own short transactions, so they survive a rollback of the
@@ -13,9 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID, uuid4
@@ -45,7 +47,7 @@ from app.models.enums import OrderStatus, PaymentStatus, UserRole
 from app.models.order import Order
 from app.models.payment import Payment, PaymentEvent
 from app.models.user import User
-from app.utils.phone import mask_phone
+from app.utils.phone import mask_phone, normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,13 @@ RECONCILE_SUCCESS_ON_CLOSED_ORDER = "success_on_closed_order"
 PROMPT_MESSAGE = "Check your phone and enter your M-Pesa PIN."
 PAYMENT_FAILED_MESSAGE = "Could not start the M-Pesa prompt. Please try again."
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
+INVALID_PHONE_MESSAGE = "Enter a valid Safaricom number, for example 0712 345 678."
+PHONE_REQUIRED_MESSAGE = "Enter the M-Pesa number to send the payment prompt to."
+
+BUYER_PAY_LOCK_PREFIX = "pay-buyer:"
+PHONE_LIMIT_WINDOW = timedelta(hours=1)
+BUYER_LIMIT_WINDOW = timedelta(hours=1)
+DISTINCT_PHONES_WINDOW = timedelta(hours=24)
 
 _OUTCOME_STATUS = {
     OUTCOME_CANCELLED: PaymentStatus.CANCELLED,
@@ -107,9 +116,22 @@ def callback_url(settings: Settings) -> str:
     return f"{settings.mpesa_callback_base_url.rstrip('/')}/api/v1/payments/callback/{settings.mpesa_callback_token}"
 
 
-def stk_target(settings: Settings, buyer: User) -> str:
-    """The phone that receives the prompt: the buyer's number, or the sandbox test number."""
-    return settings.mpesa_test_msisdn if settings.mpesa_stk_target == "test_msisdn" else buyer.phone_number
+def stk_target(settings: Settings, entered_phone: str) -> str:
+    """The number sent to Daraja (``stk_phone_number``).
+
+    ``entered`` and its alias ``registered`` use the number the buyer entered for this payment;
+    ``test_msisdn`` uses the sandbox test number.
+    """
+    return settings.mpesa_test_msisdn if settings.mpesa_stk_target == "test_msisdn" else entered_phone
+
+
+def log_startup_warnings(settings: Settings) -> None:
+    """Warn once at startup when the deprecated ``registered`` prompt target is configured."""
+    if settings.mpesa_stk_target == "registered":
+        logger.warning(
+            "MPESA_STK_TARGET=registered is a deprecated alias of entered and behaves the same; "
+            "set MPESA_STK_TARGET=entered."
+        )
 
 
 # Event logging -------------------------------------------------------------------------------
@@ -638,17 +660,130 @@ def stored_idempotency_key(buyer: User, order_id: UUID, raw_key: str) -> str:
     return f"{buyer.id}:{order_id}:{raw_key}"
 
 
+def _normalized_payment_phone(raw: str) -> str:
+    try:
+        return normalize_phone(raw)
+    except ValueError:
+        raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_phone", INVALID_PHONE_MESSAGE) from None
+
+
+def resolve_payment_phone(buyer: User, body_phone: str | None) -> str:
+    """The M-Pesa number for this payment: the one in the request body, else the buyer's profile number.
+
+    Raises 422 ``invalid_phone`` for a number that is not a valid Safaricom number and 422
+    ``phone_required`` when there is no number at all. The entered number is never saved to the user.
+    """
+    if body_phone is not None:
+        return _normalized_payment_phone(body_phone)
+    # Temporary: this profile fallback is deleted by the next backend change, which removes phone
+    # numbers from accounts. getattr keeps it working once the column is gone.
+    profile_phone = getattr(buyer, "phone_number", None)
+    if profile_phone:
+        return _normalized_payment_phone(profile_phone)
+    raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "phone_required", PHONE_REQUIRED_MESSAGE)
+
+
+def retry_after_seconds(window_starts: Iterable[datetime], window: timedelta, now: datetime) -> int:
+    """Seconds until the earliest of ``window_starts`` leaves a window of ``window`` ending at ``now``.
+
+    Rounded up to a whole second and at least 1. For an hourly limit pass the oldest counted payment;
+    for the distinct numbers limit pass each number's latest payment time.
+    """
+    starts = list(window_starts)
+    if not starts:
+        return 1
+    remaining = min(starts) + window - now
+    # Ceiling division of timedeltas gives whole seconds without any binary floating point step.
+    return max(1, -(-remaining // timedelta(seconds=1)))
+
+
+async def _lock_buyer_payments(session: AsyncSession, buyer: User) -> None:
+    """``SELECT pg_advisory_xact_lock(hashtext(:key))`` with key ``'pay-buyer:' || buyer.id``.
+
+    Transaction scoped, so the phase 1 commit or rollback releases it and it works through the
+    transaction pooler. The key is a bound parameter, never formatted into the SQL.
+    """
+    await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"{BUYER_PAY_LOCK_PREFIX}{buyer.id}"))))
+
+
+def _limit_error(code: str, message: str, retry_after: int) -> AppError:
+    return AppError(status.HTTP_429_TOO_MANY_REQUESTS, code, message, retry_after=retry_after)
+
+
+async def _check_payment_limits(
+    session: AsyncSession, settings: Settings, buyer: User, entered: str, db_now: datetime
+) -> None:
+    """Per number, per buyer and distinct number limits, all on the database clock (429 with Retry-After).
+
+    The caller holds the buyer's advisory lock, so the counts cannot change under a concurrent request
+    from the same buyer before the new payment is inserted and committed.
+    """
+    phone_window = (Payment.phone_number == entered, Payment.created_at > func.now() - PHONE_LIMIT_WINDOW)
+    recent = await session.scalar(select(func.count(Payment.id)).where(*phone_window))
+    if (recent or 0) >= settings.mpesa_phone_attempts_per_hour:
+        oldest = await session.scalar(select(func.min(Payment.created_at)).where(*phone_window))
+        raise _limit_error(
+            "too_many_payment_attempts",
+            "Too many payment attempts for this phone number. Please try again later.",
+            retry_after_seconds([oldest] if oldest is not None else [], PHONE_LIMIT_WINDOW, db_now),
+        )
+
+    buyer_window = (Order.buyer_id == buyer.id, Payment.created_at > func.now() - BUYER_LIMIT_WINDOW)
+    buyer_recent = await session.scalar(
+        select(func.count(Payment.id)).join(Order, Order.id == Payment.order_id).where(*buyer_window)
+    )
+    if (buyer_recent or 0) >= settings.mpesa_buyer_attempts_per_hour:
+        oldest = await session.scalar(
+            select(func.min(Payment.created_at)).join(Order, Order.id == Payment.order_id).where(*buyer_window)
+        )
+        raise _limit_error(
+            "too_many_buyer_payment_attempts",
+            "You have made too many payment attempts. Please try again later.",
+            retry_after_seconds([oldest] if oldest is not None else [], BUYER_LIMIT_WINDOW, db_now),
+        )
+
+    used = (
+        await session.execute(
+            select(Payment.phone_number, func.max(Payment.created_at))
+            .join(Order, Order.id == Payment.order_id)
+            .where(Order.buyer_id == buyer.id, Payment.created_at > func.now() - DISTINCT_PHONES_WINDOW)
+            .group_by(Payment.phone_number)
+        )
+    ).all()
+    latest_by_phone = {phone: latest for phone, latest in used}
+    if entered not in latest_by_phone and len(latest_by_phone) >= settings.mpesa_buyer_distinct_phones_per_day:
+        raise _limit_error(
+            "too_many_phone_numbers",
+            "You have used too many different phone numbers today. "
+            "Please try again tomorrow or use one you already used.",
+            retry_after_seconds(latest_by_phone.values(), DISTINCT_PHONES_WINDOW, db_now),
+        )
+
+
 async def _reserve_payment(
-    session: AsyncSession, settings: Settings, buyer: User, order_id: UUID, key: str
+    session: AsyncSession, settings: Settings, buyer: User, order_id: UUID, key: str, body_phone: str | None
 ) -> tuple[Payment, Order] | PaymentStart:
     """Phase 1, one short transaction: validate the order, then insert an ``initiating`` payment."""
+    # An invalid number is a 422 even for a replay.
+    replay_phone = _normalized_payment_phone(body_phone) if body_phone is not None else None
     existing = await session.scalar(select(Payment).where(Payment.idempotency_key == key))
     if existing is not None:
+        if replay_phone is not None and replay_phone != existing.phone_number:
+            raise AppError(
+                status.HTTP_409_CONFLICT,
+                "idempotency_key_reused",
+                "This request was already used with a different number. Start a new payment attempt.",
+            )
         await session.commit()
         message = PROMPT_MESSAGE if existing.status in OPEN_STATUSES else "This payment request was already handled."
         return PaymentStart(message, mask_phone(existing.stk_phone_number))
 
-    # Lock order: the order row first; payments are read and locked after it, listings never.
+    entered = resolve_payment_phone(buyer, body_phone)
+
+    # Lock order: the buyer's advisory lock, then the order row, then payments; listings never. The
+    # advisory lock makes the per buyer limits exact across the buyer's orders. No other code takes an
+    # order lock and then this lock.
+    await _lock_buyer_payments(session, buyer)
     order = await session.scalar(
         select(Order).where(Order.id == order_id, Order.buyer_id == buyer.id).with_for_update()
     )
@@ -693,32 +828,23 @@ async def _reserve_payment(
             "max_attempts_reached",
             "This order has reached the maximum number of payment attempts.",
         )
-    target = stk_target(settings, buyer)
-    recent = await session.scalar(
-        select(func.count(Payment.id)).where(
-            Payment.stk_phone_number == target, Payment.created_at > func.now() - timedelta(hours=1)
-        )
-    )
-    if (recent or 0) >= settings.mpesa_phone_attempts_per_hour:
-        raise AppError(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "too_many_payment_attempts",
-            "Too many payment requests to this phone. Try again later.",
-        )
+    # Evaluated after the business checks above, so a refused order neither consumes nor reveals a limit.
+    await _check_payment_limits(session, settings, buyer, entered, db_now)
 
     payment = Payment(
         id=uuid4(),
         order_id=order.id,
         idempotency_key=key,
-        phone_number=buyer.phone_number,
-        stk_phone_number=target,
+        # phone_number is the number entered for this payment; stk_phone_number is the one sent to Daraja.
+        phone_number=entered,
+        stk_phone_number=stk_target(settings, entered),
         amount=order.total_amount,
         status=PaymentStatus.INITIATING,
         environment="sandbox",
     )
     session.add(payment)
     try:
-        # Committing releases the order lock before any network call.
+        # Committing releases the advisory and order locks before any network call.
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -758,17 +884,19 @@ async def initiate_payment(
     buyer: User,
     order_id: UUID,
     raw_key: str,
+    phone_number: str | None = None,
 ) -> PaymentStart:
     """Start an STK Push for the buyer's order: reserve a payment row, call Daraja, then save the ids.
 
-    The client never supplies an amount, phone number or order data. On a Daraja timeout the prompt may
-    still have been sent, so a duplicate prompt is possible in the sandbox when the buyer retries.
+    ``phone_number`` is the M-Pesa number the buyer entered for this payment (None falls back to the
+    profile number for now). The client never supplies an amount or order data. On a Daraja timeout the
+    prompt may still have been sent, so a duplicate prompt is possible in the sandbox when the buyer retries.
     """
     settings = get_settings()
     require_payments_configured(settings, client)
     assert client is not None
     reserved = await _reserve_payment(
-        session, settings, buyer, order_id, stored_idempotency_key(buyer, order_id, raw_key)
+        session, settings, buyer, order_id, stored_idempotency_key(buyer, order_id, raw_key), phone_number
     )
     if isinstance(reserved, PaymentStart):
         return reserved
