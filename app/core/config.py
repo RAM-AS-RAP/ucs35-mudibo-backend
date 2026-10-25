@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _URL_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
 _PHONE = re.compile(r"254[17][0-9]{8}")
 _HOST_NAME = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?")
+LOGIN_OTP_ROLE_CHOICES = ("farmer", "buyer", "admin")
 
 
 def split_csv(value: str) -> list[str]:
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     supabase_storage_bucket: str = "listing-images"
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60
+    access_token_expire_minutes: int = 480
     cors_origins: str = ""
     login_max_failures: int = 5
     login_failure_window_minutes: int = 15
@@ -85,8 +86,9 @@ class Settings(BaseSettings):
     min_order_total_kes: int = 10
     max_pending_orders_per_buyer: int = 3
     order_reference_length: int = 8
+    # scripts/seed_demo_data.py only: you@gmail.com gives demo addresses like you+demo-farmer1@gmail.com.
+    demo_email_base: str = ""
     seed_admin_name: str = ""
-    seed_admin_phone: str = ""
     seed_admin_email: str = ""
     seed_admin_password: str = ""
     invite_code_pepper: str = ""
@@ -99,6 +101,21 @@ class Settings(BaseSettings):
     reset_code_ttl_minutes: int = 15
     reset_max_attempts: int = 5
     reset_max_requests_per_hour: int = 3
+    # Roles that need an emailed code after the password (comma list of farmer, buyer, admin). Production
+    # refuses a list without admin. Roles not listed sign in with the password alone.
+    login_otp_roles: str = "farmer,buyer,admin"
+    reg_ttl_minutes: int = 60
+    reg_code_ttl_minutes: int = 15
+    reg_max_attempts: int = 5
+    reg_max_sends: int = 5
+    reg_resend_cooldown_seconds: int = 60
+    reg_exists_notice_minutes: int = 10
+    login_code_ttl_minutes: int = 10
+    login_challenge_ttl_minutes: int = 10
+    login_max_attempts: int = 5
+    login_max_sends: int = 3
+    login_resend_cooldown_seconds: int = 60
+    login_challenges_per_hour: int = 10
     email_provider: Literal["console", "smtp", "resend", "brevo"] = "console"
     email_api_key: str = ""
     email_from_name: str = "Admin via AgriSence"
@@ -310,18 +327,69 @@ class Settings(BaseSettings):
             raise ValueError("INVITE_TTL_DAYS must be between 1 and 30")
         return value
 
-    @field_validator("invite_code_ttl_minutes", "reset_code_ttl_minutes")
+    @field_validator(
+        "invite_code_ttl_minutes",
+        "reset_code_ttl_minutes",
+        "reg_code_ttl_minutes",
+        "login_code_ttl_minutes",
+        "login_challenge_ttl_minutes",
+    )
     @classmethod
     def validate_code_ttl_minutes(cls, value: int) -> int:
         if not 5 <= value <= 60:
             raise ValueError("Code lifetimes must be between 5 and 60 minutes")
         return value
 
-    @field_validator("invite_max_attempts", "reset_max_attempts")
+    @field_validator("invite_max_attempts", "reset_max_attempts", "reg_max_attempts", "login_max_attempts")
     @classmethod
     def validate_code_max_attempts(cls, value: int) -> int:
         if not 1 <= value <= 20:
             raise ValueError("Code attempt limits must be between 1 and 20")
+        return value
+
+    @field_validator("login_otp_roles")
+    @classmethod
+    def validate_login_otp_roles(cls, value: str) -> str:
+        roles = [role.lower() for role in split_csv(value)]
+        unknown = [role for role in roles if role not in LOGIN_OTP_ROLE_CHOICES]
+        if unknown:
+            raise ValueError("LOGIN_OTP_ROLES must be a comma list of farmer, buyer and admin")
+        return ",".join(dict.fromkeys(roles))
+
+    @field_validator("reg_ttl_minutes")
+    @classmethod
+    def validate_reg_ttl_minutes(cls, value: int) -> int:
+        if not 10 <= value <= 1440:
+            raise ValueError("REG_TTL_MINUTES must be between 10 and 1440")
+        return value
+
+    @field_validator("reg_max_sends", "login_max_sends")
+    @classmethod
+    def validate_auth_max_sends(cls, value: int) -> int:
+        # The pending_registrations and login_challenges check constraints allow send_count 1 to 5.
+        if not 1 <= value <= 5:
+            raise ValueError("REG_MAX_SENDS and LOGIN_MAX_SENDS must be between 1 and 5")
+        return value
+
+    @field_validator("reg_resend_cooldown_seconds", "login_resend_cooldown_seconds")
+    @classmethod
+    def validate_auth_resend_cooldown(cls, value: int) -> int:
+        if not 10 <= value <= 3600:
+            raise ValueError("Resend cooldowns must be between 10 and 3600 seconds")
+        return value
+
+    @field_validator("reg_exists_notice_minutes")
+    @classmethod
+    def validate_reg_exists_notice_minutes(cls, value: int) -> int:
+        if not 1 <= value <= 1440:
+            raise ValueError("REG_EXISTS_NOTICE_MINUTES must be between 1 and 1440")
+        return value
+
+    @field_validator("login_challenges_per_hour")
+    @classmethod
+    def validate_login_challenges_per_hour(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("LOGIN_CHALLENGES_PER_HOUR must be between 1 and 100")
         return value
 
     @field_validator("invite_max_sends")
@@ -402,7 +470,22 @@ class Settings(BaseSettings):
             raise ValueError("ALLOWED_HOSTS must list explicit host names (no *) when APP_ENV is production")
         if self.rate_limits_disabled:
             raise ValueError("RATE_LIMITS_DISABLED is not allowed when APP_ENV is production")
+        if "admin" not in self.login_otp_role_set:
+            raise ValueError("LOGIN_OTP_ROLES must include admin when APP_ENV is production")
         return self
+
+    @model_validator(mode="after")
+    def validate_code_windows(self) -> "Settings":
+        if self.reg_code_ttl_minutes > self.reg_ttl_minutes:
+            raise ValueError("REG_CODE_TTL_MINUTES must not exceed REG_TTL_MINUTES")
+        if self.login_code_ttl_minutes > self.login_challenge_ttl_minutes:
+            raise ValueError("LOGIN_CODE_TTL_MINUTES must not exceed LOGIN_CHALLENGE_TTL_MINUTES")
+        return self
+
+    @property
+    def login_otp_role_set(self) -> frozenset[str]:
+        """Roles whose password sign in is followed by an emailed code."""
+        return frozenset(split_csv(self.login_otp_roles))
 
     @property
     def is_production(self) -> bool:
@@ -415,7 +498,7 @@ class Settings(BaseSettings):
 
     @property
     def codes_configured(self) -> bool:
-        """Report whether invite and reset codes can be hashed (the pepper is set)."""
+        """Report whether email codes (invites, resets, registration, sign in) can be hashed."""
         return bool(self.invite_code_pepper)
 
     @property

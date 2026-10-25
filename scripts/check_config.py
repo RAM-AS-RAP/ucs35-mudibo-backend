@@ -37,6 +37,23 @@ _URL_SAFE = re.compile(r"[A-Za-z0-9_-]+")
 _PHONE = re.compile(r"254[17][0-9]{8}")
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?")
 _TRUE = {"1", "true", "yes", "on"}
+LOGIN_OTP_CHOICES = ("farmer", "buyer", "admin")
+LOGIN_OTP_DEFAULT = ("farmer", "buyer", "admin")
+# Allowed ranges, matching app.core.config.Settings.
+CODE_LIMITS = {
+    "REG_TTL_MINUTES": (10, 1440),
+    "REG_CODE_TTL_MINUTES": (5, 60),
+    "REG_MAX_ATTEMPTS": (1, 20),
+    "REG_MAX_SENDS": (1, 5),
+    "REG_RESEND_COOLDOWN_SECONDS": (10, 3600),
+    "REG_EXISTS_NOTICE_MINUTES": (1, 1440),
+    "LOGIN_CODE_TTL_MINUTES": (5, 60),
+    "LOGIN_CHALLENGE_TTL_MINUTES": (5, 60),
+    "LOGIN_MAX_ATTEMPTS": (1, 20),
+    "LOGIN_MAX_SENDS": (1, 5),
+    "LOGIN_RESEND_COOLDOWN_SECONDS": (10, 3600),
+    "LOGIN_CHALLENGES_PER_HOUR": (1, 100),
+}
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,46 @@ def check_jwt(env: Mapping[str, str]) -> list[Check]:
     if len(secret) < 48:
         return [Check("auth", "JWT_SECRET", WEAK, "use at least 48 random characters")]
     return [Check("auth", "JWT_SECRET", OK, f"{len(secret)} characters")]
+
+
+def _int_in_range(raw: str, low: int, high: int) -> bool:
+    try:
+        value = int(raw)
+    except ValueError:
+        return False
+    return low <= value <= high
+
+
+def check_login_codes(env: Mapping[str, str]) -> list[Check]:
+    """Sign in and registration code settings; only names and fixed notes are reported."""
+    checks = []
+    raw_roles = env.get("LOGIN_OTP_ROLES")
+    roles = _csv(raw_roles.lower()) if raw_roles is not None else list(LOGIN_OTP_DEFAULT)
+    if any(role not in LOGIN_OTP_CHOICES for role in roles):
+        checks.append(Check("auth", "LOGIN_OTP_ROLES", INVALID, "a comma list of farmer, buyer and admin"))
+    elif "admin" not in roles and is_production(env):
+        checks.append(Check("auth", "LOGIN_OTP_ROLES", INVALID, "must include admin in production"))
+    elif "admin" not in roles:
+        checks.append(Check("auth", "LOGIN_OTP_ROLES", WEAK, "administrators sign in without an emailed code"))
+    else:
+        checks.append(Check("auth", "LOGIN_OTP_ROLES", OK, f"{len(roles)} role(s) need an emailed sign in code"))
+
+    expiry = _get(env, "ACCESS_TOKEN_EXPIRE_MINUTES")
+    if expiry and not _int_in_range(expiry, 5, 1440):
+        checks.append(Check("auth", "ACCESS_TOKEN_EXPIRE_MINUTES", INVALID, "between 5 and 1440"))
+    else:
+        checks.append(Check("auth", "ACCESS_TOKEN_EXPIRE_MINUTES", OK, "default 480 (8 hours)"))
+
+    invalid = [
+        key
+        for key, (low, high) in CODE_LIMITS.items()
+        if _get(env, key) and not _int_in_range(_get(env, key), low, high)
+    ]
+    if invalid:
+        checks.append(Check("auth", "REG_* and LOGIN_* limits", INVALID, "out of range: " + ", ".join(invalid)))
+    else:
+        checks.append(Check("auth", "REG_* and LOGIN_* limits", OK, "within the allowed ranges"))
+    return checks
 
 
 def check_cors_and_hosts(env: Mapping[str, str]) -> list[Check]:
@@ -252,7 +309,7 @@ def check_codes_and_frontend(env: Mapping[str, str]) -> list[Check]:
     checks = []
     pepper = _get(env, "INVITE_CODE_PEPPER")
     if not pepper:
-        checks.append(Check("codes", "INVITE_CODE_PEPPER", MISSING, "invite and reset routes answer 503"))
+        checks.append(Check("codes", "INVITE_CODE_PEPPER", MISSING, "every email code route answers 503"))
     elif len(pepper) < 32:
         checks.append(Check("codes", "INVITE_CODE_PEPPER", INVALID, "fewer than 32 characters"))
     else:
@@ -275,6 +332,7 @@ def run_checks(env: Mapping[str, str]) -> list[Check]:
     return [
         *check_database(env),
         *check_jwt(env),
+        *check_login_codes(env),
         *check_cors_and_hosts(env),
         *check_supabase(env),
         *check_mpesa(env),
