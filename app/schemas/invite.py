@@ -11,7 +11,6 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.schemas.common import Page
-from app.utils.phone import normalize_phone
 
 CODE_MIN_LENGTH = 4
 CODE_MAX_LENGTH = 20
@@ -27,7 +26,6 @@ class CreateInviteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=2, max_length=100)
-    phone_number: str
     email: EmailStr
 
     @field_validator("name")
@@ -37,11 +35,6 @@ class CreateInviteRequest(BaseModel):
         if len(stripped) < 2:
             raise ValueError("Name must contain at least 2 characters")
         return stripped
-
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone(cls, value: str) -> str:
-        return normalize_phone(value)
 
     @field_validator("email")
     @classmethod
@@ -53,7 +46,6 @@ class InviteSentOut(BaseModel):
     id: UUID
     name: str
     email_masked: str
-    phone_masked: str
     expires_at: datetime
     code_expires_at: datetime
     email_sent: bool

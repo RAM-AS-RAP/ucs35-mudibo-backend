@@ -183,7 +183,7 @@ Then install the new dependency (`python -m pip install -r requirements.txt`, wh
 
 ## 5. Create the initial administrator (optional)
 
-After the database migrations have been applied, set `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, and `SEED_ADMIN_EMAIL` in `.env`. The phone must be a Kenyan mobile number. Either set `SEED_ADMIN_PASSWORD` to a password of at least 12 characters or leave it blank to be prompted twice without echoing it. Then run once per environment:
+After the database migrations have been applied, set `SEED_ADMIN_NAME` and `SEED_ADMIN_EMAIL` in `.env` (accounts have no phone number; `SEED_ADMIN_PHONE` is no longer read). Either set `SEED_ADMIN_PASSWORD` to a password of at least 12 characters or leave it blank to be prompted twice without echoing it. Then run once per environment:
 
 ```bash
 python -m scripts.seed_admin
@@ -191,7 +191,9 @@ python -m scripts.seed_admin
 
 The script exits without changes if a super admin already exists. Remove `SEED_ADMIN_PASSWORD` from `.env` after a successful seed. Do not run the price seed script until its FEWS file and product mappings have been configured in `scripts/seed_prices.py`.
 
-Farmer/buyer registration and password changes require 8-128 characters, including an uppercase letter, lowercase letter, digit, and non-whitespace symbol. Login continues to accept existing passwords so users are not locked out by policy changes.
+Accounts are identified by a verified email only (identity v2). Farmers and buyers register with name, email and password and confirm the email with an emailed code before the account exists. Every password sign in for the roles in `LOGIN_OTP_ROLES` (default all three) needs a second step: a code emailed after the password is verified. So the first super admin sign in already needs email delivery: use `EMAIL_PROVIDER=console` in development (the code is written to `.dev_mailbox/`), or the recovery script `python -m scripts.admin_recovery issue-login-code --email <email>` (requires `ALLOW_ADMIN_RECOVERY=1`; see [docs/admin.md](docs/admin.md)). Moving an existing project to identity v2 wipes its data: follow [docs/identity-v2-cutover.md](docs/identity-v2-cutover.md).
+
+Farmer/buyer registration and password changes require 8-128 characters, including an uppercase letter, lowercase letter, digit, and non-whitespace symbol. Sign in continues to accept existing passwords so users are not locked out by policy changes.
 
 ## 6. Run the API
 
@@ -209,7 +211,7 @@ The unauthenticated process health check is `http://127.0.0.1:8000/api/v1/health
 
 With the API running and `APP_ENV=development`, open **http://127.0.0.1:8000/docs**. ReDoc is at **http://127.0.0.1:8000/redoc**. Interactive docs are disabled when `APP_ENV=production`.
 
-To call protected endpoints, use `POST /api/v1/auth/login` with an existing account. Click **Authorize** in Swagger and enter the returned access token. The `/auth/register/farmer` and `/auth/register/buyer` routes can create farmer and buyer accounts when the database is available. An admin must be created with the seed step above.
+To call protected endpoints, sign in with `POST /api/v1/auth/login` (email and password), read the code from the email (with `EMAIL_PROVIDER=console`, the newest file in `.dev_mailbox/`), and send it with the `challenge_token` to `POST /api/v1/auth/login/verify`. Click **Authorize** in Swagger and enter the returned access token. The `/auth/register/farmer` and `/auth/register/buyer` routes start a registration that `/auth/register/verify` completes with the emailed code. An admin must be created with the seed step above.
 
 ## 8. M-Pesa Daraja sandbox and ngrok setup
 
@@ -331,22 +333,22 @@ Both should return `{"status":"ok"}`. In a browser, the free domain first shows 
 
 ### 8.8 Make a test payment
 
-1. Open http://127.0.0.1:8000/docs, log in as a buyer with `POST /api/v1/auth/login`, and click **Authorize** with the access token.
+1. Open http://127.0.0.1:8000/docs, sign in as a buyer with `POST /api/v1/auth/login` and `POST /api/v1/auth/login/verify` (the code is emailed; with `EMAIL_PROVIDER=console` it is in `.dev_mailbox/`), and click **Authorize** with the access token.
 2. Create an order with `POST /api/v1/orders`. An order expires after `ORDER_EXPIRY_MINUTES` (default 5), and a payment must start with at least 90 seconds left.
-3. Call `POST /api/v1/orders/{id}/pay` with an `Idempotency-Key` header (8 to 64 characters of `A-Z a-z 0-9 _ -`, for example `test-pay-0001`) and **no body**. Use a new key for each new attempt; repeating a key replays the first response.
+3. Call `POST /api/v1/orders/{id}/pay` with an `Idempotency-Key` header (8 to 64 characters of `A-Z a-z 0-9 _ -`, for example `test-pay-0001`) and the body `{"phone_number": "0708374149"}` (required; accounts have no phone number). Use a new key for each new attempt; repeating a key with the same number replays the first response.
 
    The same call from a terminal, with `$TOKEN`/`$ORDER_ID` replaced by your values.
 
    Windows PowerShell:
 
    ```powershell
-   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -Headers @{ Authorization = "Bearer $TOKEN"; "Idempotency-Key" = "test-pay-0001" }
+   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -Headers @{ Authorization = "Bearer $TOKEN"; "Idempotency-Key" = "test-pay-0001" } -ContentType "application/json" -Body '{"phone_number": "0708374149"}'
    ```
 
    macOS or Linux:
 
    ```bash
-   curl -X POST "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: test-pay-0001"
+   curl -X POST "http://127.0.0.1:8000/api/v1/orders/$ORDER_ID/pay" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: test-pay-0001" -H "Content-Type: application/json" -d '{"phone_number": "0708374149"}'
    ```
 
 4. A 202 response contains `"prompt": "Prompt sent to 254*******149"`. Poll `GET /api/v1/orders/{id}`: the payment moves from `initiated` to `completed` and the order to `paid` when Daraja calls back.
@@ -423,7 +425,8 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest -q -m "not db"` 
 | `python scripts/export_openapi.py` | Writes `docs/openapi.json`, the frontend contract. |
 | `python scripts/e2e_check.py` | Manual end-to-end check of the farmer, buyer and admin journeys against a running server. See [docs/testing.md](docs/testing.md). |
 | `python -m scripts.seed_demo_data` | Creates demo farmers, buyers and listings for frontend work (never in production). |
-| `python -m scripts.seed_admin` | One-time super admin seed. |
+| `python -m scripts.seed_admin` | One-time super admin seed (name, email, password; the first sign in needs an emailed code). |
+| `python -m scripts.admin_recovery reset-password --email <email>` / `issue-login-code --email <email>` | Operator recovery for administrators when email is down; refuses unless `ALLOW_ADMIN_RECOVERY=1`. See [docs/admin.md](docs/admin.md). |
 
 ## Documentation
 
@@ -434,6 +437,7 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest -q -m "not db"` 
 - [docs/backup.md](docs/backup.md): logical backups with `pg_dump`.
 - [docs/deployment.md](docs/deployment.md): deployment checklist.
 - [docs/ci.md](docs/ci.md): what the CI pipeline checks.
+- [docs/identity-v2-cutover.md](docs/identity-v2-cutover.md): moving a project to email only accounts (wipes the data; the exact steps).
 - [docs/decisions.md](docs/decisions.md), [docs/schema.md](docs/schema.md), [docs/payments.md](docs/payments.md), [docs/admin.md](docs/admin.md), [docs/email.md](docs/email.md).
 
 ## Implemented scope
@@ -463,10 +467,22 @@ Before deploying, run `python scripts/check_config.py` in the target environment
 | `SUPABASE_STORAGE_BUCKET` | Listing image bucket. |
 | `JWT_SECRET` | Token signing secret; minimum 32 characters. |
 | `JWT_ALGORITHM` | Access-token signing algorithm. |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifetime, from 5 to 1440 minutes. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifetime, from 5 to 1440 minutes (default 480, 8 hours). |
 | `CORS_ORIGINS` | Comma-separated allowed frontend origins, each `scheme://host[:port]` with no path or trailing slash; no `*` in production. |
-| `LOGIN_MAX_FAILURES` | Failed identifier attempts allowed per window. |
-| `LOGIN_FAILURE_WINDOW_MINUTES` | Per-identifier throttle window. |
+| `LOGIN_MAX_FAILURES` | Failed sign in attempts allowed per email per window. |
+| `LOGIN_FAILURE_WINDOW_MINUTES` | Per email throttle window. |
+| `LOGIN_OTP_ROLES` | Roles that need an emailed code after the password: comma list of `farmer`, `buyer`, `admin` (default all three). Production refuses a list without `admin`. |
+| `LOGIN_CODE_TTL_MINUTES` / `LOGIN_CHALLENGE_TTL_MINUTES` | Lifetime of a sign in code and of its challenge, 5 to 60 (default 10 and 10; the code cannot outlive the challenge). |
+| `LOGIN_MAX_ATTEMPTS` | Wrong sign in codes before the challenge locks, 1 to 20 (default 5). |
+| `LOGIN_MAX_SENDS` | Sign in codes sent per challenge, 1 to 5 (default 3). |
+| `LOGIN_RESEND_COOLDOWN_SECONDS` | Gap between sign in code emails, 10 to 3600 (default 60). |
+| `LOGIN_CHALLENGES_PER_HOUR` | Sign in challenges per user per hour, 1 to 100 (default 10). |
+| `REG_TTL_MINUTES` | Lifetime of a pending registration, 10 to 1440 (default 60). |
+| `REG_CODE_TTL_MINUTES` | Lifetime of a registration code, 5 to 60 (default 15). |
+| `REG_MAX_ATTEMPTS` | Wrong registration codes before the registration locks, 1 to 20 (default 5). |
+| `REG_MAX_SENDS` | Registration codes sent per registration, 1 to 5 (default 5). |
+| `REG_RESEND_COOLDOWN_SECONDS` | Gap between registration code emails, 10 to 3600 (default 60). |
+| `REG_EXISTS_NOTICE_MINUTES` | Minimum gap between "account exists" emails for one address, per process, 1 to 1440 (default 10). |
 | `MPESA_ENV` | Must remain `sandbox`. |
 | `MPESA_BASE_URL` | Must remain `https://sandbox.safaricom.co.ke`. |
 | `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | Daraja sandbox OAuth credentials. |
@@ -495,9 +511,11 @@ Before deploying, run `python scripts/check_config.py` in the target environment
 | `MIN_ORDER_TOTAL_KES` | Smallest order total in shillings (default 10). |
 | `MAX_PENDING_ORDERS_PER_BUYER` | Unexpired pending orders a buyer may hold (default 3). |
 | `ORDER_REFERENCE_LENGTH` | Order reference length, 6 to 12 characters (default 8). |
-| `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, `SEED_ADMIN_EMAIL` | Initial super-admin profile. |
+| `SEED_ADMIN_NAME`, `SEED_ADMIN_EMAIL` | Initial super-admin profile (`SEED_ADMIN_PHONE` was removed). |
 | `SEED_ADMIN_PASSWORD` | Optional initial password, at least 12 characters; remove after seeding. |
-| `INVITE_CODE_PEPPER` | Secret (at least 32 characters) used to HMAC invite and reset codes. Without it the invite and reset routes return 503 `codes_unavailable`; the rest of the API works. |
+| `DEMO_EMAIL_BASE` | `scripts/seed_demo_data.py` only: `you@gmail.com` gives demo addresses like `you+demo-farmer1@gmail.com`; empty gives `demo.farmer1@example.com` style addresses. |
+| `ALLOW_ADMIN_RECOVERY` | Process environment only: `1` lets `scripts/admin_recovery.py` run. Never set it on the server. |
+| `INVITE_CODE_PEPPER` | Secret (at least 32 characters) used to HMAC every email code: registration, sign in, invites and resets (the name is historical). Without it those routes return 503 `codes_unavailable`, so nobody in `LOGIN_OTP_ROLES` can sign in; the rest of the API works. |
 | `INVITE_TTL_DAYS` | Days an admin invite stays open, 1 to 30 (default 7). |
 | `INVITE_CODE_TTL_MINUTES` | Minutes an emailed invite code works, 5 to 60 (default 15). |
 | `INVITE_MAX_ATTEMPTS` | Wrong codes in total before an invite locks, 1 to 20 (default 10). |
@@ -516,7 +534,7 @@ Before deploying, run `python scripts/check_config.py` in the target environment
 | `SMTP_HOST`, `SMTP_PORT` | SMTP server (default `smtp.gmail.com`, `587`). |
 | `SMTP_SECURITY` | `starttls` (port 587, default) or `ssl` (port 465). Certificate verification is always on. |
 | `SMTP_USERNAME`, `SMTP_PASSWORD` | SMTP login; for Gmail the account address and an app password, never the normal password. |
-| `SMTP_TIMEOUT_SECONDS` | SMTP connection and command timeout, 1 to 120 (default 15). |
+| `SMTP_TIMEOUT_SECONDS` | SMTP connection and command timeout, 1 to 120 (default 15); also bounds the synchronous sign in code email for every provider. |
 | `LOG_FORMAT` | `text` (default) or `json` (one JSON object per line with `time`, `level`, `logger`, `message`, `request_id`, `method`, `path`, `status`, `duration_ms`). |
 | `MAX_JSON_BODY_BYTES` | Largest JSON or form request body, 1024 to 10485760 (default 65536); larger bodies get 413 `payload_too_large`. The two multipart listing routes allow `MAX_IMAGE_BYTES` + 64 KiB. |
 | `DB_STATEMENT_TIMEOUT_MS` | `SET LOCAL statement_timeout` for every transaction, 0 (off) or 100 to 600000 (default 15000). |

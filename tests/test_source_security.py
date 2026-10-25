@@ -65,9 +65,7 @@ def is_formatted_string(node: ast.AST) -> bool:
     if isinstance(node, ast.JoinedStr):
         return True
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-        return isinstance(node.left, ast.Constant | ast.JoinedStr) and isinstance(
-            getattr(node.left, "value", ""), str
-        )
+        return isinstance(node.left, ast.Constant | ast.JoinedStr) and isinstance(getattr(node.left, "value", ""), str)
     return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format"
 
 

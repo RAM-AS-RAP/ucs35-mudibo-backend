@@ -13,19 +13,61 @@ This document is for the frontend repository (the AgriSence PWA and admin screen
 
 ## Authentication
 
-- `POST /auth/login` with `{"identifier": "<phone or email>", "password": "..."}` returns:
+Accounts are email only. **Phone numbers are gone from every account, registration, profile, invitation and admin user view.** A phone number is entered only on the pay screen, for that payment.
 
-  ```json
-  {"access_token": "...", "token_type": "bearer", "expires_in": 3600, "role": "farmer", "is_super_admin": false, "must_change_password": false}
-  ```
+### What disappeared
 
-- `GET /auth/me` returns the profile: `id`, `name`, `phone_number`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at`. Registration and `POST /auth/accept-invite` return the same shape (with `is_super_admin: false`).
+- `phone_number` in the registration body, the login body (`identifier` is replaced by `email`), `GET /auth/me`, `GET /admin/users` items, the invite body, and `phone_masked` in the invite responses.
+- `GET /admin/users?q=` no longer matches phone prefixes; it matches name and email.
+- Registration no longer returns the account (201 `UserOut`); it returns 202 and the account is created by the code step.
+- The flat login response is replaced by `AuthResult` (below).
 
-- Send `Authorization: Bearer <access_token>` on every other call. Tokens last 60 minutes (`expires_in` seconds). There is no refresh token: when the token expires, the user logs in again.
-- **On any 401, clear the stored session and go to the login screen.** A 401 also happens after the account is disabled or the password was changed on another device.
-- Route the user by `role` (`farmer`, `buyer`, `admin`). The super admin is an `admin` account with `is_super_admin: true`. Read the flag from the login response or, after a reload, from `GET /auth/me`; both come from the database row (the token does not carry it). Show the super admin screens (Invites, email check) only when it is true. Do not probe the invite routes to find out: they are rate limited.
-- If `must_change_password` is true, or any call returns **403 `password_change_required`**, show the change-password screen. Only `POST /auth/change-password` and `GET /auth/me` work until then. After a successful change, the response says `login_required: true`. Discard the token and log in again.
-- Registration: `POST /auth/register/farmer` or `/auth/register/buyer` with `{"name", "phone_number", "email" (optional), "password"}`. The password needs 8 to 128 characters with an upper case letter, a lower case letter, a digit and a symbol. Kenyan phone numbers may be typed as `07…`, `01…`, `+254…` or `254…`.
+### AuthResult
+
+Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`) returns `AuthResult`. Branch on `status`; fields that do not apply are absent.
+
+```json
+{"status": "signed_in", "access_token": "...", "token_type": "bearer", "expires_in": 28800, "role": "farmer", "must_change_password": false, "is_super_admin": false}
+```
+
+```json
+{"status": "code_required", "challenge_token": "...", "email_masked": "a***@e***.com", "code_expires_at": "2026-10-26T09:10:00Z", "resend_available_in": 60, "code_sent": true}
+```
+
+- `signed_in`: store the access token and route by `role`. Tokens last **8 hours** (`expires_in` seconds, from `ACCESS_TOKEN_EXPIRE_MINUTES`); there is no refresh token, so the user signs in again (password and code) when it expires.
+- `code_required`: show the code screen ("We sent a code to a***@e***.com"). If `code_sent` is false, say the email could not be sent and offer Resend once the countdown ends.
+
+### Keep tokens in memory only
+
+The `registration_token` and the `challenge_token` are secrets for one flow. **Keep them in a variable in memory only** (component or store state): never in `localStorage`, `sessionStorage`, IndexedDB, a cookie, a URL, a query string or a log. If the page reloads, the user starts the flow again. The access token may be kept as before (memory or app-scoped storage).
+
+### Registration sequence
+
+1. `POST /auth/register/farmer` or `/auth/register/buyer` with `{"name", "email", "password"}`. The password needs 8 to 128 characters with an upper case letter, a lower case letter, a digit and a symbol (422 `validation_error`), and must pass the policy (422 `password_too_weak` with `reason`).
+2. The answer is always **202** with `{message, registration_token, email_masked, code_expires_at, resend_available_in}`, also when the address already has an account. Show the generic `message` ("If this address can be registered, we have sent a code to it.") and the code screen. Never tell the user whether the address exists.
+3. `POST /auth/register/verify` with `{"registration_token", "code"}`. 201 `AuthResult` (`signed_in`) means the account exists and the user is signed in; no further code is needed.
+4. Any failure is **400 `invalid_or_expired_code`** ("That code is incorrect or has expired. Request a new code or start again."). Show it as is; offer Resend and "Start again".
+5. Resend: `POST /auth/register/resend` with `{"registration_token"}` always answers 202 `{message, resend_available_in}`. Show a countdown of `resend_available_in` seconds (60 by default) before enabling Resend again. A new code replaces the old one; up to 5 codes are sent per registration. Wrong codes count across resends: after 5 wrong codes the registration is locked and the user must start again.
+6. Submitting the registration form again returns a **new** `registration_token`; the old one stops working, so always use the latest.
+
+### Sign in sequence
+
+1. `POST /auth/login` with `{"email", "password"}`. A wrong password, unknown email or disabled account all give 401 `invalid_credentials` ("Wrong email or password.").
+2. `status: "signed_in"`: done (roles outside `LOGIN_OTP_ROLES`). `status: "code_required"`: show the code screen with a countdown of `resend_available_in` seconds for Resend.
+3. `POST /auth/login/verify` with `{"challenge_token", "code"}` returns 200 `AuthResult` (`signed_in`).
+   - 400 `invalid_or_expired_code` ("That code is incorrect or has expired."): let the user try again. After 5 wrong codes the next answer is `challenge_closed`.
+   - 400 `challenge_closed` ("Start again from the sign in screen."): drop the challenge token and go back to the password step.
+4. Resend: `POST /auth/login/resend` with `{"challenge_token"}` returns 200 `{code_sent, resend_available_in, code_expires_at}`. 429 `resend_cooldown` carries `Retry-After` (seconds left of the 60 second cooldown); 409 `send_limit_reached` (3 codes per sign in) means start again; 400 `challenge_closed` means start again. The old code stops working after a resend.
+5. 429 `too_many_login_codes` (more than 10 sign ins in an hour) carries `Retry-After`; disable the sign in button for that long.
+6. A new sign in replaces the previous challenge, so a code from an earlier attempt stops working.
+
+### Session rules
+
+- Send `Authorization: Bearer <access_token>` on every other call.
+- **On any 401, clear the stored session and go to the sign in screen.** A 401 also happens after the account is disabled or the password was changed or reset on another device.
+- Route the user by `role` (`farmer`, `buyer`, `admin`). The super admin is an `admin` account with `is_super_admin: true`. Read the flag from the `AuthResult` or, after a reload, from `GET /auth/me`; both come from the database row (the token does not carry it). Show the super admin screens (Invites, email check) only when it is true. Do not probe the invite routes to find out: they are rate limited.
+- `GET /auth/me` returns `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at`.
+- If `must_change_password` is true, or any call returns **403 `password_change_required`**, show the change-password screen. Only `POST /auth/change-password` and `GET /auth/me` work until then. After a successful change, the response says `login_required: true`. Discard the token and sign in again (password and code).
 
 ## Pagination
 
@@ -45,19 +87,20 @@ Every error body has this shape (some codes add `reason`, `fields`/`details`, `e
 
 - Branch on `code`, never on `message` (messages may change).
 - Every response has an `X-Request-ID` header, and errors repeat it as `request_id`. Show it in error dialogs ("Reference: …") so users can quote it to support. The client may send its own `X-Request-ID` (a UUID) to correlate logs.
-- **429** (`rate_limited`, `too_many_payment_attempts`, `too_many_buyer_payment_attempts`, `too_many_phone_numbers`, `resend_cooldown`) and **503** (`service_unavailable`, `busy`) include `Retry-After` in seconds. Disable the action and retry automatically at most once after that many seconds; for 503 `busy` one silent retry is fine.
+- **429** (`rate_limited`, `too_many_login_codes`, `too_many_payment_attempts`, `too_many_buyer_payment_attempts`, `too_many_phone_numbers`, `resend_cooldown`) and **503** (`service_unavailable`, `busy`) include `Retry-After` in seconds. Disable the action and retry automatically at most once after that many seconds; for 503 `busy` one silent retry is fine.
 - **422 `validation_error`** has `fields` (field names) and `details` (`[{field, message}]`); highlight those fields.
 
 Suggested user messages:
 
 | Code | Status | Suggested message |
 | --- | --- | --- |
-| `invalid_credentials` | 401 | "Wrong phone/email or password." (on other screens: session ended, log in again) |
+| `invalid_credentials` | 401 | "Wrong email or password." (on other screens: session ended, sign in again) |
+| `challenge_closed` | 400 | "Start again from the sign in screen." |
+| `too_many_login_codes` | 429 | "Too many sign in codes were requested. Try again later." |
 | `password_change_required` | 403 | "Please set a new password to continue." |
 | `forbidden` | 403 | "You don't have access to this page." |
 | `wrong_current_password` | 400 | "Your current password is incorrect." |
 | `password_too_weak` | 422 | "Choose a stronger password." plus the `reason` |
-| `conflict` | 409 | "An account with this phone number or email already exists." |
 | `validation_error` | 422 | "Please check the highlighted fields." |
 | `body_not_allowed` | 422 | "Something went wrong. Please try again." (client bug) |
 | `not_found` / `method_not_allowed` | 404/405 | "This page is not available." (client bug) |
@@ -96,15 +139,15 @@ Suggested user messages:
 | `too_many_phone_numbers` | 429 | "You have used too many different phone numbers today. Please try again tomorrow or use one you already used." |
 | `payment_request_failed` | 502 | "Could not start the M-Pesa prompt. Please try again." |
 | `payments_unavailable` | 503 | "Payments are not available right now." |
-| `invalid_or_expired_code` | 400 | "The code is invalid or has expired." |
+| `invalid_or_expired_code` | 400 | Show the server `message`: registration "That code is incorrect or has expired. Request a new code or start again.", sign in "That code is incorrect or has expired.", invites and resets "The code is invalid or has expired." |
 | `codes_unavailable` | 503 | "This feature is temporarily unavailable." |
-| `user_exists` | 409 | "An account with this phone number or email already exists." |
+| `user_exists` | 409 | "An account with this email already exists." |
 | `too_many_pending_invites` | 409 | "Too many open invitations. Revoke one first." |
 | `invite_conflict` | 409 | "An invitation for this person was just created. Refresh the list." |
 | `invite_not_found` | 404 | "Invitation not found." |
 | `invite_not_pending` | 409 | "This invitation is no longer open." |
-| `send_limit_reached` | 409 | "No more codes can be sent for this invitation." |
-| `resend_cooldown` | 429 | "Please wait a minute before sending another code." |
+| `send_limit_reached` | 409 | "No more codes can be sent." (sign in: start again from the sign in screen) |
+| `resend_cooldown` | 429 | "Please wait before sending another code." Count down `Retry-After`. |
 | `no_email` | 409 | "Your account has no email address." |
 | `email_failed` | 502 | "The email could not be sent." plus the `category` |
 | `user_not_found` | 404 | "User not found." |
@@ -122,8 +165,8 @@ Any other code: show the generic message plus the reference.
 
 | Screen | Roles | Endpoints |
 | --- | --- | --- |
-| Register | public | `POST /auth/register/farmer`, `POST /auth/register/buyer` |
-| Login | public | `POST /auth/login`, then `GET /auth/me` |
+| Register, confirm email | public | `POST /auth/register/farmer`, `POST /auth/register/buyer`, `POST /auth/register/verify`, `POST /auth/register/resend` |
+| Sign in, sign in code | public | `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/login/resend`, then `GET /auth/me` |
 | Change password | all signed-in users | `POST /auth/change-password` |
 | Forgot password, reset password | public | `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm` |
 | Accept admin invitation | public | `POST /auth/accept-invite`, `POST /auth/invite/request-code` |
@@ -163,8 +206,8 @@ Buyers never see prices or forecasts (403). Farmers never see the buyer browse s
 1. `POST /orders` with `{"listing_id": "...", "quantity": "2.5"}` reserves stock and returns the order (`OrderOut`). Show `total_amount` from the response.
 2. Countdown: compute the remaining time as `expires_at - server_time` from the response, then count down locally. Never use the device clock alone, because it may be wrong.
 3. Pay: ask for the M-Pesa number on the pay screen, then `POST /orders/{id}/pay` with `{"phone_number": "<as typed>"}` and header `Idempotency-Key: <UUID>`. Accept `07…`, `01…`, `+254…` or `254…`, with spaces or dashes; the server normalises it. Generate **one new UUID per click** on "Pay". If that request fails at the network level or times out, retry with the **same** key and the **same** number. A replay returns the same 202 and never sends a second prompt; a replay with a different number gives 409 `idempotency_key_reused`, so a changed number always needs a new key. The 202 response has `message` ("Check your phone and enter your M-Pesa PIN.") and `prompt` (the masked phone the prompt went to). Show both.
-   - The body is optional for now: without it (or with `{}`) the profile phone number is used while accounts still have one. Once phone numbers are removed from accounts the field becomes effectively required (422 `phone_required` without it), so always send it.
-   - The number is used for that payment only and is not saved to the profile. Prefilling the field from the last number used on this device is fine.
+   - The number is **required**: accounts have no phone number to fall back to. A missing body, a missing field or an empty value gives 422 `phone_required`. Make the field mandatory in the form.
+   - The number is used for that payment only and is not saved anywhere else. Prefilling the field from the last number used on this device is fine.
    - `payment.phone_masked` is the entered number and `payment.stk_target_masked` the number the prompt went to (the sandbox test number on a test server), both masked to the last 3 digits. Either is `null`/absent only when there is no payment (`payment` is `null`).
    - 422 `invalid_phone` or `phone_required` belong on the number field. The three payment 429 codes carry `Retry-After`; disable Pay for that long.
 4. Poll `GET /orders/{id}` **every 3 seconds for up to 150 seconds**. Stop as soon as the order status is final, or the latest payment status is final while the order is still `pending_payment`.
@@ -203,11 +246,12 @@ If 150 seconds pass with no final status, stop polling and show "We haven't rece
 
 These pages need no token.
 
-- Accept invitation (link in the invite email, `FRONTEND_BASE_URL/accept-invite`): `POST /auth/accept-invite` with `{"email": "...", "code": "...", "password": "..."}`. Admin passwords need at least 12 characters. Success is 201; then send the user to login. To get a new code: `POST /auth/invite/request-code` with `{"email": "..."}` (always 202).
-- Forgot password: `POST /auth/password-reset/request` with `{"email": "..."}` (always 202 with the same message, whether or not the account exists).
-- Reset password (`FRONTEND_BASE_URL/reset-password`): `POST /auth/password-reset/confirm` with `{"email": "...", "code": "...", "new_password": "..."}`. Success is 204; then go to login.
+- Accept invitation (link in the invite email, `FRONTEND_BASE_URL/accept-invite`): `POST /auth/accept-invite` with `{"email": "...", "code": "...", "password": "..."}`. Admin passwords need at least 12 characters. Success is 201 `AuthResult` with `status: "signed_in"` and an access token: the new admin is signed in directly (the invite code proved the email), so go straight to the admin dashboard. To get a new code: `POST /auth/invite/request-code` with `{"email": "..."}` (always 202). Invitations have no phone number.
+- Forgot password: `POST /auth/password-reset/request` with `{"email": "..."}` (always 202 with the same message, whether or not the account exists). Every account has an email, so this works for farmers, buyers and admins.
+- Reset password (`FRONTEND_BASE_URL/reset-password`): `POST /auth/password-reset/confirm` with `{"email": "...", "code": "...", "new_password": "..."}`. Success is 204; then go to sign in, where the user enters the new password and then a sign in code.
 - Code input: codes are 8 characters shown as `XXXX-XXXX`. Accept lower case, spaces and hyphens, and send what the user typed. The server normalises it. Never put a code in a URL.
 - Every failure returns the same 400 `invalid_or_expired_code`. Show one generic message and do not suggest which part was wrong.
+- The same code input is used for the registration code and the sign in code.
 
 ## CORS
 

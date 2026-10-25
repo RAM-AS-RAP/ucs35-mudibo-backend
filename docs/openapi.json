@@ -806,6 +806,145 @@
         "title": "AttentionCounts",
         "type": "object"
       },
+      "AuthResult": {
+        "properties": {
+          "access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Token"
+          },
+          "challenge_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Challenge Token"
+          },
+          "code_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Expires At"
+          },
+          "code_sent": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Code Sent"
+          },
+          "email_masked": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Masked"
+          },
+          "expires_in": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires In"
+          },
+          "is_super_admin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Super Admin"
+          },
+          "must_change_password": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Must Change Password"
+          },
+          "resend_available_in": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resend Available In"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "status": {
+            "enum": [
+              "signed_in",
+              "code_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "token_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Type"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "AuthResult",
+        "type": "object"
+      },
       "Body_create_listing_api_v1_listings_post": {
         "properties": {
           "crop": {
@@ -951,15 +1090,10 @@
             "minLength": 2,
             "title": "Name",
             "type": "string"
-          },
-          "phone_number": {
-            "title": "Phone Number",
-            "type": "string"
           }
         },
         "required": [
           "name",
-          "phone_number",
           "email"
         ],
         "title": "CreateInviteRequest",
@@ -1342,17 +1476,12 @@
           "name": {
             "title": "Name",
             "type": "string"
-          },
-          "phone_masked": {
-            "title": "Phone Masked",
-            "type": "string"
           }
         },
         "required": [
           "id",
           "name",
           "email_masked",
-          "phone_masked",
           "expires_at",
           "code_expires_at",
           "email_sent",
@@ -1476,10 +1605,9 @@
       "LoginRequest": {
         "additionalProperties": false,
         "properties": {
-          "identifier": {
-            "maxLength": 254,
-            "minLength": 3,
-            "title": "Identifier",
+          "email": {
+            "format": "email",
+            "title": "Email",
             "type": "string"
           },
           "password": {
@@ -1490,10 +1618,73 @@
           }
         },
         "required": [
-          "identifier",
+          "email",
           "password"
         ],
         "title": "LoginRequest",
+        "type": "object"
+      },
+      "LoginResendOut": {
+        "properties": {
+          "code_expires_at": {
+            "format": "date-time",
+            "title": "Code Expires At",
+            "type": "string"
+          },
+          "code_sent": {
+            "title": "Code Sent",
+            "type": "boolean"
+          },
+          "resend_available_in": {
+            "title": "Resend Available In",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code_sent",
+          "resend_available_in",
+          "code_expires_at"
+        ],
+        "title": "LoginResendOut",
+        "type": "object"
+      },
+      "LoginResendRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_token": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Challenge Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge_token"
+        ],
+        "title": "LoginResendRequest",
+        "type": "object"
+      },
+      "LoginVerifyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_token": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Challenge Token",
+            "type": "string"
+          },
+          "code": {
+            "maxLength": 20,
+            "minLength": 4,
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "challenge_token",
+          "code"
+        ],
+        "title": "LoginVerifyRequest",
         "type": "object"
       },
       "MarketSummary": {
@@ -1828,22 +2019,25 @@
       },
       "PayRequest": {
         "additionalProperties": false,
-        "description": "Optional body of ``POST /orders/{id}/pay``: the M-Pesa number to send the prompt to.",
+        "description": "Body of ``POST /orders/{id}/pay``: the M-Pesa number to send the prompt to (required).\n\nAccounts have no phone number, so this is the only source of the number. A missing body, a missing\nfield or an empty value is answered with 422 ``phone_required`` by the service (not by validation),\nwhich is why the field is optional to the validator but required in the published schema.",
         "properties": {
           "phone_number": {
             "anyOf": [
               {
                 "maxLength": 20,
-                "minLength": 3,
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
+            "description": "The M-Pesa number for this payment, for example 0712 345 678.",
             "title": "Phone Number"
           }
         },
+        "required": [
+          "phone_number"
+        ],
         "title": "PayRequest",
         "type": "object"
       },
@@ -2335,18 +2529,12 @@
       },
       "RegisterRequest": {
         "additionalProperties": false,
+        "description": "Farmer or buyer registration; the account is created only after the emailed code is entered.",
         "properties": {
           "email": {
-            "anyOf": [
-              {
-                "format": "email",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Email"
+            "format": "email",
+            "title": "Email",
+            "type": "string"
           },
           "name": {
             "maxLength": 100,
@@ -2359,18 +2547,107 @@
             "minLength": 8,
             "title": "Password",
             "type": "string"
-          },
-          "phone_number": {
-            "title": "Phone Number",
-            "type": "string"
           }
         },
         "required": [
           "name",
-          "phone_number",
+          "email",
           "password"
         ],
         "title": "RegisterRequest",
+        "type": "object"
+      },
+      "RegisterResendRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "registration_token": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Registration Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registration_token"
+        ],
+        "title": "RegisterResendRequest",
+        "type": "object"
+      },
+      "RegisterVerifyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 20,
+            "minLength": 4,
+            "title": "Code",
+            "type": "string"
+          },
+          "registration_token": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Registration Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registration_token",
+          "code"
+        ],
+        "title": "RegisterVerifyRequest",
+        "type": "object"
+      },
+      "RegistrationAccepted": {
+        "description": "The identical 202 body of every registration request, whether or not the address has an account.",
+        "properties": {
+          "code_expires_at": {
+            "format": "date-time",
+            "title": "Code Expires At",
+            "type": "string"
+          },
+          "email_masked": {
+            "title": "Email Masked",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "registration_token": {
+            "title": "Registration Token",
+            "type": "string"
+          },
+          "resend_available_in": {
+            "title": "Resend Available In",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message",
+          "registration_token",
+          "email_masked",
+          "code_expires_at",
+          "resend_available_in"
+        ],
+        "title": "RegistrationAccepted",
+        "type": "object"
+      },
+      "ResendAccepted": {
+        "description": "The identical 202 body of every registration resend request.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "resend_available_in": {
+            "title": "Resend Available In",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message",
+          "resend_available_in"
+        ],
+        "title": "ResendAccepted",
         "type": "object"
       },
       "ResolutionOut": {
@@ -2500,44 +2777,6 @@
         "title": "StatsOut",
         "type": "object"
       },
-      "TokenResponse": {
-        "properties": {
-          "access_token": {
-            "title": "Access Token",
-            "type": "string"
-          },
-          "expires_in": {
-            "title": "Expires In",
-            "type": "integer"
-          },
-          "is_super_admin": {
-            "title": "Is Super Admin",
-            "type": "boolean"
-          },
-          "must_change_password": {
-            "title": "Must Change Password",
-            "type": "boolean"
-          },
-          "role": {
-            "title": "Role",
-            "type": "string"
-          },
-          "token_type": {
-            "default": "bearer",
-            "title": "Token Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "access_token",
-          "expires_in",
-          "role",
-          "is_super_admin",
-          "must_change_password"
-        ],
-        "title": "TokenResponse",
-        "type": "object"
-      },
       "UserAdminOut": {
         "properties": {
           "created_at": {
@@ -2580,15 +2819,13 @@
             "title": "Disabled By Name"
           },
           "email": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Email"
+            "title": "Email",
+            "type": "string"
+          },
+          "email_verified_at": {
+            "format": "date-time",
+            "title": "Email Verified At",
+            "type": "string"
           },
           "id": {
             "format": "uuid",
@@ -2633,10 +2870,6 @@
             ],
             "title": "Order Count"
           },
-          "phone_number": {
-            "title": "Phone Number",
-            "type": "string"
-          },
           "role": {
             "title": "Role",
             "type": "string"
@@ -2645,8 +2878,8 @@
         "required": [
           "id",
           "name",
-          "phone_number",
           "email",
+          "email_verified_at",
           "role",
           "is_super_admin",
           "is_disabled",
@@ -2728,16 +2961,8 @@
             "type": "string"
           },
           "email": {
-            "anyOf": [
-              {
-                "format": "email",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Email"
+            "title": "Email",
+            "type": "string"
           },
           "id": {
             "format": "uuid",
@@ -2756,10 +2981,6 @@
             "title": "Name",
             "type": "string"
           },
-          "phone_number": {
-            "title": "Phone Number",
-            "type": "string"
-          },
           "role": {
             "title": "Role",
             "type": "string"
@@ -2768,7 +2989,6 @@
         "required": [
           "id",
           "name",
-          "phone_number",
           "email",
           "role",
           "is_super_admin",
@@ -4051,7 +4271,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserOut"
+                  "$ref": "#/components/schemas/AuthResult"
                 }
               }
             },
@@ -4179,7 +4399,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TokenResponse"
+                  "$ref": "#/components/schemas/AuthResult"
                 }
               }
             },
@@ -4197,6 +4417,88 @@
           }
         },
         "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/login/resend": {
+      "post": {
+        "operationId": "resend_login_code_api_v1_auth_login_resend_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginResendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResendOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resend Login Code",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/login/verify": {
+      "post": {
+        "operationId": "verify_login_api_v1_auth_login_verify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Login",
         "tags": [
           "auth"
         ]
@@ -4317,11 +4619,11 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserOut"
+                  "$ref": "#/components/schemas/RegistrationAccepted"
                 }
               }
             },
@@ -4358,11 +4660,11 @@
           "required": true
         },
         "responses": {
-          "201": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/UserOut"
+                  "$ref": "#/components/schemas/RegistrationAccepted"
                 }
               }
             },
@@ -4380,6 +4682,88 @@
           }
         },
         "summary": "Register Farmer",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/register/resend": {
+      "post": {
+        "operationId": "resend_registration_code_api_v1_auth_register_resend_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterResendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResendAccepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resend Registration Code",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/register/verify": {
+      "post": {
+        "operationId": "verify_registration_api_v1_auth_register_verify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify Registration",
         "tags": [
           "auth"
         ]
@@ -5332,7 +5716,7 @@
     },
     "/api/v1/orders/{order_id}/pay": {
       "post": {
-        "description": "Send an M-Pesa STK prompt for the buyer's order to the number entered for this payment.\n\nThe body is optional: none, ``{}``, or ``{\"phone_number\": \"...\"}``. The amount always comes from\nthe server.",
+        "description": "Send an M-Pesa STK prompt for the buyer's order to the number entered for this payment.\n\nThe body ``{\"phone_number\": \"...\"}`` is required: a missing body, a missing field or an empty value\ngives 422 ``phone_required``. The amount always comes from the server.",
         "operationId": "pay_order_api_v1_orders__order_id__pay_post",
         "parameters": [
           {
@@ -5377,7 +5761,8 @@
                 "title": "Body"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "202": {

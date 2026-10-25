@@ -36,6 +36,9 @@ from app.services import (
 
 pytestmark = pytest.mark.db
 
+# The number entered for a payment; accounts have no phone number.
+PAY_PHONE = "254712000555"
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def dispose_engine_after_test() -> AsyncIterator[None]:
@@ -53,7 +56,8 @@ def factory_for(db_session: AsyncSession):
 async def make_user(session: AsyncSession, role: UserRole, **values) -> User:
     user = User(
         name=f"Test {role.value}",
-        phone_number=f"2547{secrets.randbelow(10**8):08d}",
+        email=f"zz-test-{role.value}-{secrets.token_hex(4)}@example.com",
+        email_verified_at=func.now(),
         password_hash="not-a-real-hash",
         role=role,
         **values,
@@ -158,8 +162,8 @@ async def test_resolve_end_to_end_with_real_triggers(db_session: AsyncSession) -
         Payment(
             order_id=order.id,
             idempotency_key=f"key-{uuid4()}",
-            phone_number=buyer.phone_number,
-            stk_phone_number=buyer.phone_number,
+            phone_number=PAY_PHONE,
+            stk_phone_number=PAY_PHONE,
             amount=order.total_amount,
             status=PaymentStatus.INITIATED,
             checkout_request_id=checkout_request_id,

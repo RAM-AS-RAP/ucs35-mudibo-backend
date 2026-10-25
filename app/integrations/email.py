@@ -1,4 +1,8 @@
-"""Transactional email: admin invitation and password reset codes.
+"""Transactional email: registration, sign in, admin invitation and password reset codes.
+
+Email is a hard dependency of sign in: farmers, buyers and administrators confirm their address with a
+code when they register (or accept an invite) and, for the roles in ``LOGIN_OTP_ROLES``, receive a code
+after every correct password.
 
 ``send_email`` dispatches on ``EMAIL_PROVIDER``:
 

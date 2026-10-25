@@ -4,39 +4,46 @@ Usage (from the repository root, with ``.env`` pointing at a development databas
 
     python -m scripts.seed_demo_data
 
-What it does, through the application's own service functions and the database in ``DATABASE_URL``:
+What it does, against the database in ``DATABASE_URL``:
 
-- creates 2 demo farmers and 2 demo buyers (names start with ``Demo ``, phone numbers fixed below) with
-  random passwords that are printed ONCE to this terminal; an account that already exists (looked up by
-  phone) is left unchanged and its password is not shown again;
+- creates 2 demo farmers and 2 demo buyers (names start with ``Demo ``) directly in the database with a
+  verified email (``email_verified_at = now()``), ``must_change_password = false`` and random passwords
+  that are printed ONCE to this terminal; an account that already exists (looked up by email) is left
+  unchanged and its password is not shown again;
 - creates about 8 listings for maize and beans in the markets that currently have prices in
   ``market_prices``, with varied quantities and prices around the latest monthly price, unless the demo
   farmers already have active listings; no images.
 
+Demo emails come from ``DEMO_EMAIL_BASE``: ``you@gmail.com`` becomes ``you+demo-farmer1@gmail.com``,
+which Gmail delivers to your own inbox. Without it they are ``demo.farmer1@example.com`` style
+addresses, which receive nothing.
+
+Signing in as a demo account needs the emailed sign in code, so use ``EMAIL_PROVIDER=console`` (the
+code is written to ``.dev_mailbox/``) or the plus addresses above.
+
 It refuses to run when ``APP_ENV`` is ``production`` and stops with a message when there are no prices yet
 (run the pipeline or ``scripts/seed_prices.py`` first). Running it again changes nothing.
-
-The demo phone numbers are not real phones. Demo buyers must pay only while the server runs with
-``MPESA_STK_TARGET=test_msisdn``, so the sandbox prompt goes to the Daraja test number instead.
 """
 
 import asyncio
 import secrets
 from decimal import ROUND_HALF_UP, Decimal
-from types import SimpleNamespace
 
+from pydantic import EmailStr, TypeAdapter
 from sqlalchemy import func, select, text
 
 from app.core.config import get_settings
+from app.core.security import hash_password
 from app.db import get_sessionmaker
 from app.models.enums import ListingStatus, UserRole
 from app.models.listing import ProduceListing
 from app.models.user import User
-from app.services import auth_service, listing_service
+from app.services import listing_service
 
-# Fixed demo accounts (254 7000001xx is a reserved-looking block used only for demos).
-DEMO_FARMERS = (("Demo Farmer Wanjiku", "254700000101"), ("Demo Farmer Otieno", "254700000102"))
-DEMO_BUYERS = (("Demo Buyer Amina", "254700000201"), ("Demo Buyer Kamau", "254700000202"))
+# Fixed demo accounts: (name, address label).
+DEMO_FARMERS = (("Demo Farmer Wanjiku", "farmer1"), ("Demo Farmer Otieno", "farmer2"))
+DEMO_BUYERS = (("Demo Buyer Amina", "buyer1"), ("Demo Buyer Kamau", "buyer2"))
+DEFAULT_DEMO_DOMAIN = "example.com"
 
 # Quantity (kg) and price factor (times the latest price) for each listing slot, in order.
 LISTING_PLAN = (
@@ -58,22 +65,43 @@ LATEST_PRICES_SQL = """
 """
 
 
+def demo_email(label: str, base: str = "") -> str:
+    """``you@gmail.com`` and ``farmer1`` give ``you+demo-farmer1@gmail.com``; no base gives example.com."""
+    base = base.strip()
+    if not base:
+        return f"demo.{label}@{DEFAULT_DEMO_DOMAIN}"
+    address = str(TypeAdapter(EmailStr).validate_python(base)).lower()
+    local, _, domain = address.partition("@")
+    local = local.split("+", 1)[0]
+    return f"{local}+demo-{label}@{domain}"
+
+
 def demo_password() -> str:
     """A random password that satisfies the registration policy (upper, lower, digit, symbol)."""
     return f"Demo-{secrets.token_urlsafe(12)}-4k!"
 
 
-async def ensure_user(name: str, phone: str, role: UserRole, created: list[tuple[str, str, str, str]]) -> User:
+async def ensure_user(name: str, email: str, role: UserRole, created: list[tuple[str, str, str, str]]) -> User:
     async with get_sessionmaker()() as session:
-        existing = await session.scalar(select(User).where(User.phone_number == phone))
+        existing = await session.scalar(select(User).where(func.lower(User.email) == email))
         if existing is not None:
             if existing.role != role:
-                raise SystemExit(f"{phone} already belongs to a {existing.role} account; change the demo numbers.")
+                raise SystemExit(f"{email} already belongs to a {existing.role} account; change DEMO_EMAIL_BASE.")
             return existing
         password = demo_password()
-        data = SimpleNamespace(name=name, phone_number=phone, email=None, password=password)
-        user = await auth_service.register_user(session, data, role=role)
-        created.append((role.value, name, phone, password))
+        user = User(
+            name=name,
+            email=email,
+            email_verified_at=func.now(),
+            password_hash=hash_password(password),
+            role=role,
+            must_change_password=False,
+            password_changed_at=func.now(),
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        created.append((role.value, name, email, password))
         return user
 
 
@@ -123,9 +151,12 @@ async def seed() -> None:
     if not prices:
         raise SystemExit("No maize or beans prices in market_prices yet. Load prices first, then run this again.")
 
+    base = settings.demo_email_base
     created: list[tuple[str, str, str, str]] = []
-    farmers = [await ensure_user(name, phone, UserRole.FARMER, created) for name, phone in DEMO_FARMERS]
-    buyers = [await ensure_user(name, phone, UserRole.BUYER, created) for name, phone in DEMO_BUYERS]
+    farmers = [
+        await ensure_user(name, demo_email(label, base), UserRole.FARMER, created) for name, label in DEMO_FARMERS
+    ]
+    buyers = [await ensure_user(name, demo_email(label, base), UserRole.BUYER, created) for name, label in DEMO_BUYERS]
 
     existing = await active_listing_count(farmers)
     listings = [] if existing else await create_listings(farmers, prices)
@@ -134,15 +165,19 @@ async def seed() -> None:
     print(f"Users: {len(farmers)} farmers and {len(buyers)} buyers ({len(created)} created now).")
     if created:
         print("\nNew demo passwords, shown ONCE. Store them somewhere safe and never reuse them anywhere else:")
-        for role, name, phone, password in created:
-            print(f"  {role:<6}  {name:<22}  {phone}  {password}")
+        for role, name, email, password in created:
+            print(f"  {role:<6}  {name:<22}  {email}  {password}")
     if listings:
         print(f"\nCreated {len(listings)} listings:")
         for line in listings:
             print(f"  {line}")
     else:
         print(f"\nListings unchanged: the demo farmers already have {existing} active listings.")
-    print("\nDemo phone numbers are not real: let demo buyers pay only with MPESA_STK_TARGET=test_msisdn.")
+    print(
+        "\nSigning in as a demo account needs the emailed sign in code: use EMAIL_PROVIDER=console "
+        "(the code is in .dev_mailbox/) or set DEMO_EMAIL_BASE to your own address for plus addresses."
+    )
+    print("Demo buyers enter an M-Pesa number when paying; the sandbox accepts the Daraja test number.")
 
 
 if __name__ == "__main__":

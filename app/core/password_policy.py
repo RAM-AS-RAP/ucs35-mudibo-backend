@@ -1,9 +1,9 @@
-"""Password policy for invite acceptance, password reset and password change.
+"""Password policy for registration, invite acceptance, password reset and password change.
 
 Admins need at least 12 characters, farmers and buyers at least 8, everyone at most 128. A password
-may not equal the account's email, the part of the email before ``@``, the name or the phone number
-(case-insensitive), and may not be one of the common passwords in ``common_passwords.txt``.
-Registration keeps its own rules in ``app.schemas.auth``.
+may not equal the account's email, the part of the email before ``@`` or the name (case-insensitive),
+and may not be one of the common passwords in ``common_passwords.txt``. Registration and password
+change also keep the character class rules in ``app.schemas.auth``.
 """
 
 from functools import lru_cache
@@ -43,7 +43,6 @@ def validate_new_password(
     *,
     email: str | None = None,
     name: str | None = None,
-    phone: str | None = None,
 ) -> None:
     """Raise 422 ``password_too_weak`` with a short reason; the reason never echoes the password."""
     minimum = minimum_length(role)
@@ -58,10 +57,8 @@ def validate_new_password(
         personal.add(email.strip().lower().split("@", 1)[0])
     if name:
         personal.add(name.strip().lower())
-    if phone:
-        personal.add(phone.strip().lower())
     personal.discard("")
     if lowered in personal:
-        raise _too_weak("The password must not be your email, name or phone number.")
+        raise _too_weak("The password must not be your email or name.")
     if lowered in common_passwords():
         raise _too_weak("This password is too common.")

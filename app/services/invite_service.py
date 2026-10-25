@@ -1,7 +1,8 @@
 """Administrator invitations by emailed code.
 
-The super admin creates, resends, lists and revokes invites; the invited person accepts with their
-email, the code and a password they choose, which creates an ordinary admin. Nobody ever sees a
+The super admin creates, resends, lists and revokes invites (name and email only); the invited person
+accepts with their email, the code and a password they choose, which creates an ordinary admin and
+signs them in (the code proves control of the email, so no sign in code follows). Nobody ever sees a
 credential: the code is emailed, only its HMAC is stored, and it is never logged or returned.
 
 Accepting uses two steps. Step A increments the attempt counter in its own committed transaction
@@ -24,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth_result import AuthResult, signed_in_result
 from app.core.codes import burn_dummy_check, ensure_codes_configured, generate_code, hash_code, verify_code
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -35,9 +37,21 @@ from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.common import Pagination
 from app.schemas.invite import AcceptInviteRequest, CreateInviteRequest, InviteOut, InvitePage, InviteSentOut
-from app.utils.phone import mask_phone
+from app.services.email_delivery import deliver, deliver_quietly
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "accept_invite",
+    "create_invite",
+    "deliver",
+    "deliver_quietly",
+    "invalid_code",
+    "list_invites",
+    "request_invite_code",
+    "resend_invite",
+    "revoke_invite",
+]
 
 PENDING_CONDITION = "used_at is null and revoked_at is null and locked_at is null and expires_at > now()"
 SENT_MESSAGE = "Invitation sent. The code in the email is valid for {minutes} minutes."
@@ -57,30 +71,12 @@ def invite_not_pending() -> AppError:
     return AppError(status.HTTP_409_CONFLICT, "invite_not_pending", "This invite is no longer pending.")
 
 
-async def deliver(message: email_integration.EmailMessage) -> bool:
-    """Send once; report success. Failures are logged by the email module without details."""
-    try:
-        await email_integration.send_email(message)
-    except email_integration.EmailDeliveryError:
-        return False
-    except Exception:  # an unexpected failure must not undo the committed invite
-        logger.warning("email send failed unexpectedly")
-        return False
-    return True
-
-
-async def deliver_quietly(message: email_integration.EmailMessage) -> None:
-    """Background-task wrapper: the response has already been sent, so nothing is raised."""
-    await deliver(message)
-
-
 def _sent_out(row: Any, email_sent: bool) -> InviteSentOut:
     minutes = get_settings().invite_code_ttl_minutes
     return InviteSentOut(
         id=row["id"],
         name=row["name"],
         email_masked=email_integration.mask_email(row["email"]),
-        phone_masked=mask_phone(row["phone_number"]),
         expires_at=row["expires_at"],
         code_expires_at=row["code_expires_at"],
         email_sent=email_sent,
@@ -98,7 +94,7 @@ async def _store_new_code(session: AsyncSession, invite_id: UUID, code: str) -> 
             "       last_sent_at = now(),"
             "       send_count = send_count + 1"
             " where id = :id"
-            " returning id, name, email, phone_number, expires_at, code_expires_at"
+            " returning id, name, email, expires_at, code_expires_at"
         ),
         {
             "id": invite_id,
@@ -116,24 +112,22 @@ async def create_invite(session: AsyncSession, actor: User, body: CreateInviteRe
     """Create (or replace) a pending invite, commit, then email the code."""
     ensure_codes_configured()
     settings = get_settings()
-    params = {"email": body.email, "phone": body.phone_number}
+    params = {"email": body.email}
     # Serialises invite creation so the pending cap cannot be exceeded by concurrent requests.
     await session.execute(text("select pg_advisory_xact_lock(hashtext('public.admin_invites'))"))
     user_exists = await session.scalar(
-        text("select exists(select 1 from public.users where phone_number = :phone or lower(email) = :email)"),
+        text("select exists(select 1 from public.users where lower(email) = :email)"),
         params,
     )
     if user_exists:
         await session.rollback()
-        raise AppError(
-            status.HTTP_409_CONFLICT, "user_exists", "An account with this email or phone number already exists."
-        )
-    # The newest invite replaces any older one for the same email or phone (also expired or locked
-    # ones, which still hold the one-pending-invite unique index).
+        raise AppError(status.HTTP_409_CONFLICT, "user_exists", "An account with this email already exists.")
+    # The newest invite replaces any older one for the same email (also expired or locked ones, which
+    # still hold the one-pending-invite unique index).
     await session.execute(
         text(
             "update public.admin_invites set revoked_at = now()"
-            " where (email = :email or phone_number = :phone) and used_at is null and revoked_at is null"
+            " where email = :email and used_at is null and revoked_at is null"
         ),
         params,
     )
@@ -151,12 +145,12 @@ async def create_invite(session: AsyncSession, actor: User, body: CreateInviteRe
         result = await session.execute(
             text(
                 "insert into public.admin_invites"
-                " (id, email, name, phone_number, code_hash, code_expires_at, created_by, expires_at)"
-                " values (:id, :email, :name, :phone, :code_hash,"
+                " (id, email, name, code_hash, code_expires_at, created_by, expires_at)"
+                " values (:id, :email, :name, :code_hash,"
                 "         now() + make_interval(mins => cast(:code_minutes as integer)),"
                 "         :created_by,"
                 "         now() + make_interval(days => cast(:days as integer)))"
-                " returning id, name, email, phone_number, expires_at, code_expires_at"
+                " returning id, name, email, expires_at, code_expires_at"
             ),
             {
                 **params,
@@ -298,8 +292,8 @@ async def revoke_invite(session: AsyncSession, actor: User, invite_id: UUID) -> 
 # Public ---------------------------------------------------------------------------------------
 
 
-async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dict[str, Any]:
-    """Create an ordinary admin from a valid code; see the module docstring for the two steps."""
+async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> AuthResult:
+    """Create an ordinary admin from a valid code and sign them in; see the module docstring."""
     ensure_codes_configured()
     settings = get_settings()
     # Only rules that reveal nothing about any invite are checked before the code.
@@ -311,7 +305,7 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
             "update public.admin_invites set attempts = attempts + 1"
             " where email = :email and used_at is null and revoked_at is null and locked_at is null"
             "   and expires_at > now() and code_expires_at > now() and attempts < :max_attempts"
-            " returning id, name, phone_number, code_hash, attempts"
+            " returning id, name, code_hash, attempts"
         ),
         {"email": body.email, "max_attempts": settings.invite_max_attempts},
     )
@@ -331,9 +325,7 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
         raise invalid_code()
     await session.commit()
 
-    validate_new_password(
-        body.password, UserRole.ADMIN, email=body.email, name=attempt["name"], phone=attempt["phone_number"]
-    )
+    validate_new_password(body.password, UserRole.ADMIN, email=body.email, name=attempt["name"])
     password_hash = hash_password(body.password)
 
     # Step B: claim the invite and create the admin together.
@@ -343,7 +335,7 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
                 "update public.admin_invites set used_at = now()"
                 " where id = :id and used_at is null and revoked_at is null and locked_at is null"
                 "   and expires_at > now()"
-                " returning name, phone_number, email, created_by"
+                " returning name, email, created_by"
             ),
             {"id": attempt["id"]},
         )
@@ -354,15 +346,14 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
         result = await session.execute(
             text(
                 "insert into public.users"
-                " (name, phone_number, email, password_hash, role, is_super_admin, must_change_password,"
-                "  created_by, password_changed_at)"
-                " values (:name, :phone, :email, :password_hash, 'admin', false, false, :created_by, now())"
-                " returning id, name, phone_number, email, cast(role as text) as role, is_super_admin,"
+                " (name, email, password_hash, role, is_super_admin, must_change_password,"
+                "  created_by, password_changed_at, email_verified_at)"
+                " values (:name, :email, :password_hash, 'admin', false, false, :created_by, now(), now())"
+                " returning id, name, email, cast(role as text) as role, is_super_admin,"
                 "           must_change_password, created_at"
             ),
             {
                 "name": claimed["name"],
-                "phone": claimed["phone_number"],
                 "email": claimed["email"],
                 "password_hash": password_hash,
                 "created_by": claimed["created_by"],
@@ -374,7 +365,7 @@ async def accept_invite(session: AsyncSession, body: AcceptInviteRequest) -> dic
         await session.rollback()
         raise invalid_code() from None
     logger.info("admin_invite_accepted invite=%s user=%s", attempt["id"], user["id"])
-    return user
+    return signed_in_result(user)
 
 
 async def request_invite_code(session: AsyncSession, email: str, background_tasks: BackgroundTasks) -> None:

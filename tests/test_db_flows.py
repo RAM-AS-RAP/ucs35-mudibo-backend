@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,9 @@ from app.schemas.common import Pagination
 from app.services import forecast_service, listing_service, market_service, order_service, payment_service
 
 pytestmark = pytest.mark.db
+
+# The number entered for a payment; accounts have no phone number.
+PAY_PHONE = "254712000555"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -68,7 +71,8 @@ def auth(user: User) -> dict[str, str]:
 async def make_user(session: AsyncSession, role: UserRole) -> User:
     user = User(
         name=f"Test {role.value}",
-        phone_number=f"2547{secrets.randbelow(10**8):08d}",
+        email=f"zz-test-{role.value}-{secrets.token_hex(4)}@example.com",
+        email_verified_at=func.now(),
         password_hash="not-a-real-hash",
         role=role,
     )
@@ -110,8 +114,8 @@ async def make_order_with_open_payment(session: AsyncSession, buyer: User) -> Or
         Payment(
             order_id=order.id,
             idempotency_key=f"key-{uuid4()}",
-            phone_number=buyer.phone_number,
-            stk_phone_number=buyer.phone_number,
+            phone_number=PAY_PHONE,
+            stk_phone_number=PAY_PHONE,
             amount=order.total_amount,
             status=PaymentStatus.INITIATED,
             checkout_request_id=f"ws_CO_{uuid4().hex}",
@@ -214,8 +218,8 @@ async def test_expiry_job_expires_order_times_out_payment_and_restores_stock(db_
     payment = Payment(
         order_id=created.id,
         idempotency_key=f"key-{uuid4()}",
-        phone_number=buyer.phone_number,
-        stk_phone_number=buyer.phone_number,
+        phone_number=PAY_PHONE,
+        stk_phone_number=PAY_PHONE,
         amount=created.total_amount,
         status=PaymentStatus.INITIATING,
     )
@@ -288,7 +292,7 @@ async def test_second_payment_while_one_is_open_returns_409(
 
     with pytest.raises(AppError) as exc_info:
         await payment_service.initiate_payment(
-            db_session, session_factory_for(db_session), NoDaraja(), buyer, order.id, f"key-{uuid4().hex}"
+            db_session, session_factory_for(db_session), NoDaraja(), buyer, order.id, f"key-{uuid4().hex}", PAY_PHONE
         )
 
     assert exc_info.value.status_code == 409

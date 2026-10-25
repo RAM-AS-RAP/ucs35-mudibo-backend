@@ -667,20 +667,15 @@ def _normalized_payment_phone(raw: str) -> str:
         raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_phone", INVALID_PHONE_MESSAGE) from None
 
 
-def resolve_payment_phone(buyer: User, body_phone: str | None) -> str:
-    """The M-Pesa number for this payment: the one in the request body, else the buyer's profile number.
+def resolve_payment_phone(body_phone: str | None) -> str:
+    """The M-Pesa number for this payment, exactly as the buyer entered it in the request body.
 
-    Raises 422 ``invalid_phone`` for a number that is not a valid Safaricom number and 422
-    ``phone_required`` when there is no number at all. The entered number is never saved to the user.
+    Raises 422 ``phone_required`` when the number is missing or empty and 422 ``invalid_phone`` for a
+    number that is not a valid Safaricom number. Accounts have no phone number to fall back to.
     """
-    if body_phone is not None:
-        return _normalized_payment_phone(body_phone)
-    # Temporary: this profile fallback is deleted by the next backend change, which removes phone
-    # numbers from accounts. getattr keeps it working once the column is gone.
-    profile_phone = getattr(buyer, "phone_number", None)
-    if profile_phone:
-        return _normalized_payment_phone(profile_phone)
-    raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "phone_required", PHONE_REQUIRED_MESSAGE)
+    if body_phone is None or not body_phone.strip():
+        raise AppError(status.HTTP_422_UNPROCESSABLE_CONTENT, "phone_required", PHONE_REQUIRED_MESSAGE)
+    return _normalized_payment_phone(body_phone)
 
 
 def retry_after_seconds(window_starts: Iterable[datetime], window: timedelta, now: datetime) -> int:
@@ -764,11 +759,11 @@ async def _reserve_payment(
     session: AsyncSession, settings: Settings, buyer: User, order_id: UUID, key: str, body_phone: str | None
 ) -> tuple[Payment, Order] | PaymentStart:
     """Phase 1, one short transaction: validate the order, then insert an ``initiating`` payment."""
-    # An invalid number is a 422 even for a replay.
-    replay_phone = _normalized_payment_phone(body_phone) if body_phone is not None else None
+    # A missing or invalid number is a 422 before any database work, also for a replay.
+    entered = resolve_payment_phone(body_phone)
     existing = await session.scalar(select(Payment).where(Payment.idempotency_key == key))
     if existing is not None:
-        if replay_phone is not None and replay_phone != existing.phone_number:
+        if entered != existing.phone_number:
             raise AppError(
                 status.HTTP_409_CONFLICT,
                 "idempotency_key_reused",
@@ -777,8 +772,6 @@ async def _reserve_payment(
         await session.commit()
         message = PROMPT_MESSAGE if existing.status in OPEN_STATUSES else "This payment request was already handled."
         return PaymentStart(message, mask_phone(existing.stk_phone_number))
-
-    entered = resolve_payment_phone(buyer, body_phone)
 
     # Lock order: the buyer's advisory lock, then the order row, then payments; listings never. The
     # advisory lock makes the per buyer limits exact across the buyer's orders. No other code takes an
@@ -888,8 +881,8 @@ async def initiate_payment(
 ) -> PaymentStart:
     """Start an STK Push for the buyer's order: reserve a payment row, call Daraja, then save the ids.
 
-    ``phone_number`` is the M-Pesa number the buyer entered for this payment (None falls back to the
-    profile number for now). The client never supplies an amount or order data. On a Daraja timeout the
+    ``phone_number`` is the M-Pesa number the buyer entered for this payment (required: None or an
+    empty value is 422 ``phone_required``). The client never supplies an amount or order data. On a Daraja timeout the
     prompt may still have been sent, so a duplicate prompt is possible in the sandbox when the buyer retries.
     """
     settings = get_settings()

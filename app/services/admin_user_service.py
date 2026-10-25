@@ -24,7 +24,7 @@ from app.models.order import Order
 from app.models.user import User
 from app.schemas.admin import UserAdminOut, UserAdminPage
 from app.schemas.common import Pagination
-from app.utils.search import LIKE_ESCAPE, contains_pattern, phone_prefix
+from app.utils.search import LIKE_ESCAPE, contains_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,8 @@ def _user_out(row: Any) -> UserAdminOut:
     return UserAdminOut(
         id=user.id,
         name=user.name,
-        phone_number=user.phone_number,
         email=user.email,
+        email_verified_at=user.email_verified_at,
         role=role,
         is_super_admin=user.is_super_admin,
         is_disabled=user.is_disabled,
@@ -92,12 +92,9 @@ async def get_user_out(session: AsyncSession, user_id: UUID) -> UserAdminOut:
 
 
 def _search_condition(q: str) -> Any:
+    """Name or email contains ``q``; LIKE wildcards in ``q`` match literally."""
     pattern = contains_pattern(q)
-    conditions = [User.name.ilike(pattern, escape=LIKE_ESCAPE), User.email.ilike(pattern, escape=LIKE_ESCAPE)]
-    digits = phone_prefix(q)
-    if digits is not None:
-        conditions.append(User.phone_number.like(f"{digits}%"))
-    return or_(*conditions)
+    return or_(User.name.ilike(pattern, escape=LIKE_ESCAPE), User.email.ilike(pattern, escape=LIKE_ESCAPE))
 
 
 async def list_users(

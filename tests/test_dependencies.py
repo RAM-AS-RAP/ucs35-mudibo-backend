@@ -41,8 +41,8 @@ def make_user(role=UserRole.FARMER, **overrides):
     values = {
         "id": uuid4(),
         "name": "Test User",
-        "phone_number": "254712345678",
         "email": "test@example.com",
+        "email_verified_at": datetime.now(UTC),
         "role": role,
         "is_disabled": False,
         "is_super_admin": False,
@@ -117,7 +117,7 @@ async def test_super_admin_route_rejects_ordinary_admin(api_client, application)
     response = await api_client.post(
         "/api/v1/admin/invites",
         headers={"Authorization": f"Bearer {token}"},
-        json={"name": "New Admin", "phone_number": "0712345678", "email": "new@example.com"},
+        json={"name": "New Admin", "email": "new@example.com"},
     )
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "forbidden"

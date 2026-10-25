@@ -28,7 +28,18 @@ NEW_FILES = [
     "schemas/invite.py",
     "services/invite_service.py",
     "services/password_reset_service.py",
+    "services/registration_service.py",
+    "services/auth_service.py",
+    "services/email_delivery.py",
+    "core/auth_result.py",
 ]
+# Request bodies that carry a code typed by the user; no other schema may have a code field.
+CODE_REQUEST_SCHEMAS = {
+    "AcceptInviteRequest",
+    "PasswordResetConfirmRequest",
+    "RegisterVerifyRequest",
+    "LoginVerifyRequest",
+}
 IMPORT_LINE = re.compile(r"^\s*(?:import|from)\s+(\S+)", re.MULTILINE)
 
 
@@ -49,7 +60,7 @@ def test_no_response_schema_has_a_password_or_code_hash(application):
         for value in vars(module).values():
             if isinstance(value, type) and issubclass(value, BaseModel):
                 for field in ("password_hash", "code_hash", "code"):
-                    if field == "code" and value.__name__ in {"AcceptInviteRequest", "PasswordResetConfirmRequest"}:
+                    if field == "code" and value.__name__ in CODE_REQUEST_SCHEMAS:
                         continue
                     assert field not in value.model_fields, f"{value.__name__}.{field}"
     schemas = json.dumps(application.openapi()["components"]["schemas"])
@@ -132,7 +143,7 @@ async def test_codes_and_api_keys_never_leak(api_client, application, monkeypatc
 
     response = await api_client.post(
         "/api/v1/admin/invites",
-        json={"name": "Grace Admin", "phone_number": "0712000001", "email": "grace@example.com"},
+        json={"name": "Grace Admin", "email": "grace@example.com"},
     )
 
     assert response.status_code == 201 and response.json()["email_sent"] is False

@@ -1,5 +1,7 @@
 """Password policy and one-time code helper tests."""
 
+import hashlib
+import string
 from uuid import uuid4
 
 import pytest
@@ -10,7 +12,9 @@ from app.core.codes import (
     DUMMY_CODE_HASH,
     format_code,
     generate_code,
+    generate_token,
     hash_code,
+    hash_token,
     normalize_code,
     verify_code,
 )
@@ -71,12 +75,16 @@ def test_common_passwords_are_rejected_case_insensitively(password):
         ("Grace.Wanjiru@example.com", {"email": "grace.wanjiru@example.com"}),
         ("GRACE.WANJIRU", {"email": "grace.wanjiru@example.com"}),
         ("grace wanjiru", {"name": "Grace Wanjiru"}),
-        ("254712000001", {"phone": "254712000001"}),
     ],
 )
 def test_personal_details_are_rejected(password, kwargs):
     reason = reason_for(password, UserRole.ADMIN, **kwargs)
-    assert reason == "The password must not be your email, name or phone number."
+    assert reason == "The password must not be your email or name."
+
+
+def test_the_policy_no_longer_takes_a_phone_number():
+    with pytest.raises(TypeError):
+        validate_new_password("254712000001xx", UserRole.ADMIN, phone="254712000001")  # type: ignore[call-arg]
 
 
 def test_a_password_that_only_contains_the_name_is_allowed():
@@ -120,6 +128,25 @@ def test_the_hash_depends_on_the_pepper(monkeypatch):
     first = hash_code("invite", record, "ABCDEFGH")
     monkeypatch.setattr(get_settings(), "invite_code_pepper", "another-test-pepper-with-32-or-more-characters")
     assert hash_code("invite", record, "ABCDEFGH") != first
+
+
+@pytest.mark.parametrize("purpose", ["register", "login"])
+def test_registration_and_login_codes_have_their_own_purpose(purpose):
+    record = uuid4()
+    stored = hash_code(purpose, record, "ABCDEFGH")
+    assert verify_code(purpose, record, "abcd-efgh", stored)
+    other = "login" if purpose == "register" else "register"
+    assert not verify_code(other, record, "ABCDEFGH", stored)
+    assert not verify_code("invite", record, "ABCDEFGH", stored)
+
+
+def test_tokens_have_256_bits_and_are_stored_as_sha256():
+    tokens = {generate_token() for _ in range(50)}
+    assert len(tokens) == 50
+    token = next(iter(tokens))
+    assert len(token) >= 43 and set(token) <= set(string.ascii_letters + string.digits + "-_")
+    assert hash_token(token) == hashlib.sha256(token.encode()).hexdigest()
+    assert token not in hash_token(token)
 
 
 def test_the_dummy_hash_never_matches():

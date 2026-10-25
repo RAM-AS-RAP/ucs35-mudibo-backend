@@ -263,7 +263,7 @@ def make_buyer(**overrides):
         "id": uuid4(),
         "role": UserRole.BUYER,
         "name": "Test Buyer",
-        "phone_number": BUYER_PHONE,
+        "email": "buyer@example.com",
         "is_disabled": False,
         "must_change_password": False,
         "is_super_admin": False,

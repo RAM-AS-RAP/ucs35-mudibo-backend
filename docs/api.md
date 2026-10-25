@@ -16,15 +16,31 @@ Public. Runs `select 1`. Returns `{"status": "ok"}`, or 503 `{"status": "degrade
 
 ### POST /api/v1/auth/register/farmer
 
-Public. Name, phone, optional email, password. Unknown fields such as `role` are rejected with 422. Returns 201 with the created farmer account. See [Authentication details](#authentication-details).
+Public, 10 per hour per IP. JSON `name`, `email`, `password`; unknown fields such as `role` or `phone_number` are rejected with 422. Always returns 202 `RegistrationAccepted` with the same shape whether or not the address already has an account; the account is created only by `POST /auth/register/verify`. See [Registration](#registration).
 
 ### POST /api/v1/auth/register/buyer
 
-Public. Same body as farmer registration. Returns 201 with the created buyer account.
+Public, 10 per hour per IP. Same body and response as farmer registration; the role comes from the route.
+
+### POST /api/v1/auth/register/verify
+
+Public, 5 per minute per IP. JSON `registration_token`, `code`. Creates the account and returns 201 `AuthResult` with `status: "signed_in"`; every failure is the same 400 `invalid_or_expired_code`.
+
+### POST /api/v1/auth/register/resend
+
+Public, 5 per hour per IP. JSON `registration_token`. Always returns 202 `{message, resend_available_in}`; a new code is emailed only when the registration allows it.
 
 ### POST /api/v1/auth/login
 
-Public. Phone/email `identifier` and `password`. Returns the bearer token, `expires_in`, `role`, `is_super_admin` and `must_change_password`.
+Public, 5 per minute per IP. JSON `email`, `password`. Returns 200 `AuthResult`: `status: "code_required"` with a `challenge_token` for the roles in `LOGIN_OTP_ROLES` (an emailed code follows), or `status: "signed_in"` with the access token. See [Sign in](#sign-in).
+
+### POST /api/v1/auth/login/verify
+
+Public, 10 per minute per IP. JSON `challenge_token`, `code`. Returns 200 `AuthResult` with `status: "signed_in"`; 400 `invalid_or_expired_code` for a wrong code, 400 `challenge_closed` when the challenge is unknown, used, locked or expired.
+
+### POST /api/v1/auth/login/resend
+
+Public, 5 per hour per IP. JSON `challenge_token`. Returns 200 `{code_sent, resend_available_in, code_expires_at}`; 429 `resend_cooldown`, 409 `send_limit_reached`, 400 `challenge_closed`.
 
 ### POST /api/v1/auth/change-password
 
@@ -36,7 +52,7 @@ Any authenticated user. Returns the current account (`UserOut`), including `is_s
 
 ### POST /api/v1/auth/accept-invite
 
-Public. JSON `email`, `code`, `password`. Returns 201 `UserOut` of the new admin. See [Invites and password reset](#invites-and-password-reset).
+Public. JSON `email`, `code`, `password`. Returns 201 `AuthResult` with `status: "signed_in"` for the new admin (the invite code proves control of the email, so no sign in code follows). See [Invites and password reset](#invites-and-password-reset).
 
 ### POST /api/v1/auth/invite/request-code
 
@@ -120,7 +136,7 @@ Owning buyer. Returns the cancelled `OrderOut`; stock is returned to the listing
 
 ### POST /api/v1/orders/{order_id}/pay
 
-Owning buyer. `Idempotency-Key` header; optional body `{"phone_number": "..."}` (the M-Pesa number for this payment). Returns 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent.
+Owning buyer. `Idempotency-Key` header; required body `{"phone_number": "..."}` (the M-Pesa number for this payment; a missing body, field or value is 422 `phone_required`). Returns 202 `OrderOut` plus `message` and `prompt`; an M-Pesa sandbox STK prompt is sent.
 
 ### POST /api/v1/payments/callback/{token}
 
@@ -128,7 +144,7 @@ Daraja only. There is no bearer authentication: the secret path token is the che
 
 ### POST /api/v1/admin/invites
 
-Super admin. JSON `name`, `phone_number`, `email`. Returns a 201 invite summary; the code is emailed, never returned.
+Super admin. JSON `name`, `email` (a `phone_number` field is rejected with 422). Returns a 201 invite summary; the code is emailed, never returned.
 
 ### POST /api/v1/admin/invites/{invite_id}/resend
 
@@ -148,7 +164,7 @@ Super admin. Empty body. Returns `{"email_sent": true}`, or 502 `email_failed` w
 
 ### GET /api/v1/admin/users
 
-Admin. Optional `role`, `is_disabled`, `q`, `limit`, `offset`. Paginated `UserAdminOut`, newest first.
+Admin. Optional `role`, `is_disabled`, `q` (name or email), `limit`, `offset`. Paginated `UserAdminOut`, newest first.
 
 ### PATCH /api/v1/admin/users/{user_id}/disable
 
@@ -494,15 +510,15 @@ Sends an M-Pesa STK Push prompt for the order through the Safaricom Daraja **san
 
 Headers: `Authorization: Bearer <token>` and `Idempotency-Key` (required, 8 to 64 characters of `A-Z`, `a-z`, `0-9`, `_`, `-`). Rate limit: 10 per minute per IP.
 
-Body (optional): no body, `{}`, or the M-Pesa number to send the prompt to:
+Body (required): the M-Pesa number to send the prompt to. Accounts have no phone number, so this is the only source of the number:
 
 ```json
 { "phone_number": "0712 345 678" }
 ```
 
-`phone_number` is a string of 3 to 20 characters (after trimming); `07...`, `01...`, `+2547...`, `2547...` and `2541...` are accepted, with spaces or dashes, and stored as `254XXXXXXXXX`. Any other field, a body that is not a JSON object, or a value of the wrong length gives 422 `validation_error`. A number that is not a valid Safaricom number gives 422 `invalid_phone`. Without a number the buyer's profile phone number is used while accounts still have one; when there is none the answer is 422 `phone_required`. The entered number is used for this payment only and is never saved to the profile. The client never sends an amount or order data: the amount is the order total. The prompt goes to the entered number, or to the sandbox test number when `MPESA_STK_TARGET=test_msisdn`.
+`phone_number` is a string of at most 20 characters (after trimming); `07...`, `01...`, `+2547...`, `2547...` and `2541...` are accepted, with spaces or dashes, and stored as `254XXXXXXXXX` on the payment (`payments.phone_number`). A missing body, a missing field, `null` or an empty value gives 422 `phone_required` before any database work. Any other field, a body that is not a JSON object, or a value longer than 20 characters gives 422 `validation_error`. A number that is not a valid Safaricom number gives 422 `invalid_phone`. The number is used for this payment only and is not verified (anyone can enter any number). The client never sends an amount or order data: the amount is the order total. The prompt goes to the entered number, or to the sandbox test number when `MPESA_STK_TARGET=test_msisdn` (`registered` is an alias of `entered`).
 
-The key is stored scoped to the buyer and order, so it cannot collide with or probe other buyers' keys. Repeating a request with the same key returns 202 with the current order and never sends a second prompt, even after the order has moved on, when the replay has no number or the same number (any accepted format). A replay with a different number gives 409 `idempotency_key_reused`. Use a new key for a new attempt.
+The key is stored scoped to the buyer and order, so it cannot collide with or probe other buyers' keys. Repeating a request with the same key and the same number (any accepted format) returns 202 with the current order and never sends a second prompt, even after the order has moved on. A replay with a different number gives 409 `idempotency_key_reused`; a replay without a number gives 422 `phone_required`. Use a new key for a new attempt.
 
 The payment can start only when the order is `pending_payment`, at least `MPESA_MIN_SECONDS_BEFORE_EXPIRY` (default 90) seconds remain before `expires_at`, no other payment is open, and the order has fewer than `MPESA_MAX_ATTEMPTS_PER_ORDER` (default 3) attempts. An `initiating` payment whose request was never sent (older than `MPESA_STALE_INITIATING_SECONDS`, default 60) is failed and does not block a new attempt. After those checks three limits apply, measured on the database clock:
 
@@ -550,8 +566,8 @@ Errors:
 | 409 | `idempotency_key_reused` | The key was already used with a different number ("This request was already used with a different number. Start a new payment attempt."). |
 | 422 | `idempotency_key_required` / `invalid_idempotency_key` | Missing or malformed `Idempotency-Key`. |
 | 422 | `invalid_phone` | The number is not a valid Safaricom number ("Enter a valid Safaricom number, for example 0712 345 678."). |
-| 422 | `phone_required` | No number in the body and none on the profile ("Enter the M-Pesa number to send the payment prompt to."). |
-| 422 | `validation_error` | Unknown body field, a body that is not a JSON object, or a `phone_number` outside 3 to 20 characters. |
+| 422 | `phone_required` | A missing body, a missing `phone_number`, `null` or an empty value ("Enter the M-Pesa number to send the payment prompt to."). |
+| 422 | `validation_error` | Unknown body field, a body that is not a JSON object, or a `phone_number` longer than 20 characters. |
 | 429 | `too_many_payment_attempts` | The entered number has `MPESA_PHONE_ATTEMPTS_PER_HOUR` payments in the last hour ("Too many payment attempts for this phone number. Please try again later."). |
 | 429 | `too_many_buyer_payment_attempts` | The buyer has `MPESA_BUYER_ATTEMPTS_PER_HOUR` payments in the last hour ("You have made too many payment attempts. Please try again later."). |
 | 429 | `too_many_phone_numbers` | A new number after `MPESA_BUYER_DISTINCT_PHONES_PER_DAY` different numbers in 24 hours ("You have used too many different phone numbers today. Please try again tomorrow or use one you already used."). |
@@ -569,7 +585,7 @@ All routes are under `/api/v1/admin` and require an admin account; the role is r
 
 Rate limits per IP: the four invite routes 10 per hour each; `POST /admin/email/test` 5 per hour; disable, enable, listing removal and order resolution 30 per hour (429 `rate_limited`).
 
-No route ever returns a credential. New admins are invited by an emailed code and choose their own password; anyone who forgets a password resets it by email (see [Invites and password reset](#invites-and-password-reset)). Admin responses never contain password hashes, codes or code hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (entered numbers and payment targets are masked, for example `254*******149`). Users' own phone numbers and emails appear only in the user routes; invite routes show masked emails (`g***@e***.com`) and phone numbers.
+No route ever returns a credential. New admins are invited by an emailed code and choose their own password; anyone who forgets a password resets it by email (see [Invites and password reset](#invites-and-password-reset)). Admin responses never contain password hashes, codes or code hashes, token hashes, idempotency keys, merchant request ids, Daraja credentials or full payment phone numbers (entered numbers and payment targets are masked, for example `254*******149`). Accounts have no phone number. Users' emails appear only in the user routes; invite routes show masked emails (`g***@e***.com`).
 
 ### Status and error codes
 
@@ -595,13 +611,13 @@ No route ever returns a credential. New admins are invited by an emailed code an
 `POST /admin/invites`. Body, unknown fields rejected (so no `role`, `is_super_admin` or other flag can be sent):
 
 ```json
-{"name": "Grace Admin", "phone_number": "0712000001", "email": "grace@example.com"}
+{"name": "Grace Admin", "email": "grace@example.com"}
 ```
 
-The phone number is normalised and the email lowercased. In one transaction the server:
+The email is lowercased; a `phone_number` field is rejected with 422 like any unknown field. In one transaction the server:
 
-1. Refuses with 409 `user_exists` when an account already has this phone number or email.
-2. Revokes any earlier pending invite for the same email or phone, so the newest invite replaces it.
+1. Refuses with 409 `user_exists` when an account already has this email.
+2. Revokes any earlier pending invite for the same email, so the newest invite replaces it.
 3. Refuses with 409 `too_many_pending_invites` when `INVITE_MAX_PENDING` (10) invites are pending.
 4. Stores the invite with an HMAC of a new 8-character code, `expires_at = now() + INVITE_TTL_DAYS` (7 days) and `code_expires_at = now() + INVITE_CODE_TTL_MINUTES` (15 minutes), using the database clock.
 
@@ -612,7 +628,6 @@ After the commit the code is emailed to the invited address. The response (`Cach
 	"id": "6f1c0e8a-2b44-4c55-9a1e-6c2f8d0b7e11",
 	"name": "Grace Admin",
 	"email_masked": "g***@e***.com",
-	"phone_masked": "254*******001",
 	"expires_at": "2026-10-22T09:00:00Z",
 	"code_expires_at": "2026-10-15T09:15:00Z",
 	"email_sent": true,
@@ -634,18 +649,18 @@ If the email cannot be sent, the invite is kept, `email_sent` is `false`, and th
 {"error": {"code": "email_failed", "message": "The email could not be sent.", "category": "auth_failed"}}
 ```
 
-Categories: `connection_timeout`, `auth_failed`, `tls_failed`, `recipient_refused`, `invalid_header`, `not_configured`, `other`. When `INVITE_CODE_PEPPER` is not set, the invite create and resend routes and the public code routes return 503 `codes_unavailable`; the rest of the API is unaffected.
+Categories: `connection_timeout`, `auth_failed`, `tls_failed`, `recipient_refused`, `invalid_header`, `not_configured`, `other`. When `INVITE_CODE_PEPPER` is not set, the invite create and resend routes and every public code route (registration, sign in codes, invite acceptance, password reset) return 503 `codes_unavailable`; the rest of the API is unaffected. Because sign in needs an emailed code for the roles in `LOGIN_OTP_ROLES`, use the console provider (or `scripts/admin_recovery.py issue-login-code`) for the very first super admin sign in before this check can be run.
 
 ### Users
 
-`GET /admin/users` filters by `role`, `is_disabled` and `q` (case-insensitive name or email, or a phone-number prefix such as `0712`). Items are `UserAdminOut`:
+`GET /admin/users` filters by `role`, `is_disabled` and `q` (case-insensitive name or email; 2 to 50 characters, `%` and `_` match literally). Items are `UserAdminOut`:
 
 ```json
 {
 	"id": "6f1c0e8a-2b44-4c55-9a1e-6c2f8d0b7e11",
 	"name": "Grace Admin",
-	"phone_number": "254712000001",
 	"email": "grace@example.com",
+	"email_verified_at": "2026-10-15T09:00:00Z",
 	"role": "admin",
 	"is_super_admin": false,
 	"is_disabled": false,
@@ -780,54 +795,133 @@ Every status appears, with 0 when there are none. `completed_sandbox_amount_kes`
 
 ## Authentication details
 
-`POST /auth/register/farmer` and `POST /auth/register/buyer` accept a JSON body with `name`, `phone_number`, optional `email`, and `password`. Unknown fields are rejected. The role is assigned by the route.
+Accounts are identified only by a verified email address; there is no phone number on any account or invitation (a phone number exists only on a payment). Farmers and buyers confirm their email with a code before the account exists, and every password sign in for the roles in `LOGIN_OTP_ROLES` (default `farmer,buyer,admin`; production must include `admin`) needs a second step: a code emailed after the password is verified. Access tokens last `ACCESS_TOKEN_EXPIRE_MINUTES` (default 480, 8 hours).
 
-Registration passwords and `new_password` on `/auth/change-password` must be 8-128 characters and include at least one uppercase letter, one lowercase letter, one digit, and one non-whitespace symbol. Login accepts existing passwords without reapplying the creation policy.
+Codes are 8 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`, shown in emails as `XXXX-XXXX`; spaces, hyphens and lower case are accepted. A code is never put in a URL, a subject line, a response or a log, and is stored only as an HMAC keyed with `INVITE_CODE_PEPPER` (the setting keeps its historical name but protects every email code). The registration token and the login challenge token are 256 random bits, stored only as a SHA-256 digest. When `INVITE_CODE_PEPPER` is not set, every route that issues or checks a code returns 503 `codes_unavailable`.
 
-New passwords chosen through change-password, invite acceptance and password reset also pass the password policy (`app/core/password_policy.py`): admins need at least 12 characters, farmers and buyers at least 8, everyone at most 128; the password may not equal the account's email, the part of the email before `@`, the name or the phone number (ignoring case), and may not be one of the common passwords in `app/core/common_passwords.txt`. A failure returns 422 with a short reason that never repeats the password:
+### AuthResult
+
+Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`) answers with `AuthResult`. Fields that do not apply to the `status` are omitted from the JSON. Responses carry `Cache-Control: no-store`.
+
+Signed in:
+
+```json
+{
+	"status": "signed_in",
+	"access_token": "<signed-token>",
+	"token_type": "bearer",
+	"expires_in": 28800,
+	"role": "farmer",
+	"must_change_password": false,
+	"is_super_admin": false
+}
+```
+
+Code required (only from `POST /auth/login`):
+
+```json
+{
+	"status": "code_required",
+	"challenge_token": "<opaque token, keep in memory only>",
+	"email_masked": "a***@e***.com",
+	"code_expires_at": "2026-10-26T09:10:00Z",
+	"resend_available_in": 60,
+	"code_sent": true
+}
+```
+
+`is_super_admin` and `must_change_password` are read from the users row, for the client UI only; the token does not carry them, and every protected route loads the user and its role from the database again. `code_sent` is `false` when the email could not be sent; the challenge is kept, so the user can resend.
+
+### Registration
+
+`POST /auth/register/farmer` and `POST /auth/register/buyer` (10 per hour per IP). Body, unknown fields rejected (so `role`, `phone_number`, `is_super_admin` and every other flag give 422); the role comes only from the route:
+
+```json
+{"name": "Amina Farmer", "email": "amina@example.com", "password": "A-long-private-passw0rd"}
+```
+
+`name` is 2 to 100 characters after trimming, `email` is lowercased. The password must be 8 to 128 characters with an uppercase letter, a lowercase letter, a digit and a symbol (422 `validation_error` listing the missing rules), and must pass the password policy for the role (422 `password_too_weak` with a `reason`; neither error reveals anything about any account).
+
+The answer is always 202 with the same shape, whether or not the address has an account:
+
+```json
+{
+	"message": "If this address can be registered, we have sent a code to it.",
+	"registration_token": "<opaque token, keep in memory only>",
+	"email_masked": "a***@e***.com",
+	"code_expires_at": "2026-10-26T09:15:00Z",
+	"resend_available_in": 60
+}
+```
+
+- New address: a pending registration is stored (hashes only) and a code valid for `REG_CODE_TTL_MINUTES` (15) is emailed. The registration itself lasts `REG_TTL_MINUTES` (60).
+- Submitting again for the same address and role: the token is rotated (the previous token stops working) and the name and password are replaced. The code is kept, and no email is sent, while it is younger than `REG_RESEND_COOLDOWN_SECONDS` (60) and valid; otherwise a new code is sent, up to `REG_MAX_SENDS` (5) emails per registration. A registration for the other role, or one that is locked or expired, is replaced by a new one.
+- Address that already has an account: nothing is stored. The account owner gets an "account exists" email (no code, no link with a secret) at most once per `REG_EXISTS_NOTICE_MINUTES` (10) per address; this throttle is kept in memory per process. The response carries a fresh token that is stored nowhere, so it can never verify.
+
+`POST /auth/register/verify` (5 per minute per IP):
+
+```json
+{"registration_token": "<token from the 202>", "code": "K7QX-2MPA"}
+```
+
+The attempt is counted in its own committed transaction before the code is compared; after `REG_MAX_ATTEMPTS` (5) wrong codes in total, across resends, the registration is locked and even the correct code is refused. A correct code claims the registration and creates the user in one transaction (`email_verified_at = now()`, `must_change_password = false`, `password_changed_at = now()`, `is_super_admin = false`) and returns 201 `AuthResult` with `status: "signed_in"`: the registration code counts as the second step, so no sign in code follows. Every failure (a dummy or unknown token, a wrong or expired code, a used, locked or replaced registration, an address that got an account in the meantime) returns the same response:
+
+```json
+{"error": {"code": "invalid_or_expired_code", "message": "That code is incorrect or has expired. Request a new code or start again."}}
+```
+
+`POST /auth/register/resend` (5 per hour per IP) with `{"registration_token": "..."}` always returns 202 `{"message": "If this address can be registered, we have sent a code to it.", "resend_available_in": 60}`, for a real, dummy or unknown token alike. When the registration is open, unlocked and unexpired, the cooldown has passed and fewer than `REG_MAX_SENDS` codes were sent, a new code replaces the old one (the old code stops working; attempts are not reset) and is emailed in a background task.
+
+### Sign in
+
+`POST /auth/login` (5 per minute per IP):
+
+```json
+{"email": "amina@example.com", "password": "A-long-private-passw0rd"}
+```
+
+A wrong password, an unknown email and a disabled account return the same 401, and no email is sent:
+
+```json
+{"error": {"code": "invalid_credentials", "message": "Invalid email or password"}}
+```
+
+After `LOGIN_MAX_FAILURES` (5) failures for one email within `LOGIN_FAILURE_WINDOW_MINUTES` (15) the email is blocked with 429 `rate_limited` (per process). A role outside `LOGIN_OTP_ROLES` gets 200 `AuthResult` with `status: "signed_in"`. Otherwise, only after a correct password, the user's active challenge is superseded, a new challenge is created (`LOGIN_CHALLENGE_TTL_MINUTES`, 10; the code is valid for `LOGIN_CODE_TTL_MINUTES`, 10), the code is emailed synchronously (bounded by `SMTP_TIMEOUT_SECONDS`), and the answer is 200 `AuthResult` with `status: "code_required"`. More than `LOGIN_CHALLENGES_PER_HOUR` (10) challenges for one user in an hour gives 429 `too_many_login_codes` with `Retry-After` (the password was correct, so this reveals nothing).
+
+`POST /auth/login/verify` (10 per minute per IP):
+
+```json
+{"challenge_token": "<token from the code_required result>", "code": "K7QX-2MPA"}
+```
+
+The attempt is counted (committed) before the comparison. Results:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 200 | | `AuthResult` with `status: "signed_in"`. |
+| 400 | `invalid_or_expired_code` | Wrong code ("That code is incorrect or has expired."). The `LOGIN_MAX_ATTEMPTS` (5) wrong code locks the challenge. |
+| 400 | `challenge_closed` | Unknown, used, superseded, locked or expired challenge, or a user disabled after the password step ("Start again from the sign in screen."). |
+
+The challenge token alone is useless without the code and the code alone is useless without the token. A user with `must_change_password` still signs in; every route except `/auth/me` and `/auth/change-password` then answers 403 `password_change_required`.
+
+`POST /auth/login/resend` (5 per hour per IP) with `{"challenge_token": "..."}`:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 200 | | `{"code_sent": true, "resend_available_in": 60, "code_expires_at": "..."}`; the old code stops working, attempts are not reset. |
+| 429 | `resend_cooldown` | Within `LOGIN_RESEND_COOLDOWN_SECONDS` (60) of the last send; `Retry-After` gives the remaining seconds. |
+| 409 | `send_limit_reached` | `LOGIN_MAX_SENDS` (3) codes were sent for this challenge. |
+| 400 | `challenge_closed` | Unknown, used, locked or expired challenge. |
+
+### Passwords and tokens
+
+Registration and `new_password` on `/auth/change-password` must be 8-128 characters and include at least one uppercase letter, one lowercase letter, one digit and one non-whitespace symbol. Sign in accepts existing passwords without reapplying the creation policy.
+
+New passwords chosen through registration, change-password, invite acceptance and password reset also pass the password policy (`app/core/password_policy.py`): admins need at least 12 characters, farmers and buyers at least 8, everyone at most 128; the password may not equal the account's email, the part of the email before `@` or the name (ignoring case), and may not be one of the common passwords in `app/core/common_passwords.txt`. A failure returns 422 with a short reason that never repeats the password:
 
 ```json
 {"error": {"code": "password_too_weak", "message": "The password is too weak.", "reason": "Use at least 12 characters."}}
 ```
-
-```json
-{
-	"name": "Amina Farmer",
-	"phone_number": "0712345678",
-	"email": "amina@example.com",
-	"password": "A-long-private-passw0rd"
-}
-```
-
-Successful registration returns `201` and a user projection (`UserOut`) containing `id`, `name`, normalized `phone_number`, `email`, `role`, `is_super_admin` (always false here), `must_change_password`, and `created_at`. It never includes a password hash or disabled-account details. `is_super_admin` cannot be sent: like every unknown field it is rejected with 422.
-
-```json
-{
-	"id": "123e4567-e89b-12d3-a456-426614174002",
-	"name": "Amina Farmer",
-	"phone_number": "254712345678",
-	"email": "amina@example.com",
-	"role": "farmer",
-	"is_super_admin": false,
-	"must_change_password": false,
-	"created_at": "2026-10-01T08:00:00Z"
-}
-```
-
-`POST /auth/login` accepts `identifier` (email or Kenyan phone number) and `password`. A successful response is `200`:
-
-```json
-{
-	"access_token": "<signed-token>",
-	"token_type": "bearer",
-	"expires_in": 3600,
-	"role": "farmer",
-	"is_super_admin": false,
-	"must_change_password": false
-}
-```
-
-`is_super_admin` is read from the user's database row at login and is true only for the super admin. It is for the client UI (for example showing the Invites screen); the token does not carry it, and every super-admin route checks the database row again.
 
 `POST /auth/change-password` accepts `current_password` and `new_password`, rejects a new password equal to the current password, and returns `200`:
 
@@ -835,32 +929,15 @@ Successful registration returns `201` and a user projection (`UserOut`) containi
 {"message": "Password changed. Log in again: your current access token is no longer accepted.", "login_required": true}
 ```
 
-`GET /auth/me` returns the current user projection (`UserOut`, same fields as the registration response). Its `is_super_admin` comes from the row loaded for this request, so it reflects the database even if the flag changed after login.
+`GET /auth/me` returns `UserOut`: `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at` (no phone number, no password hash, no disabled-account details). Its `is_super_admin` comes from the row loaded for this request.
 
-Access tokens carry their issue time (`iat`, whole seconds). Every password change (change-password, invite acceptance, password reset, and the seed script) sets `users.password_changed_at` from the database clock, and a token whose `iat` is earlier than the whole second of `password_changed_at` gets the same 401 as any invalid token. A token issued in the same second as the change stays valid.
+Access tokens carry their issue time (`iat`, whole seconds). Every password change (change-password, invite acceptance, password reset, registration, the seed and recovery scripts) sets `users.password_changed_at` from the database clock, and a token whose `iat` is earlier than the whole second of `password_changed_at` gets the same 401 as any invalid token.
 
-For example, a password missing an uppercase letter and symbol returns `422` with safe field-specific details:
+Authentication error codes: `invalid_credentials` (401) is identical for unknown, incorrect-password and disabled accounts; `password_change_required` (403) blocks other authenticated routes until a forced password change is done; `forbidden` (403) indicates a role or super-admin failure; `rate_limited` (429) covers the IP and per email throttles; `too_many_login_codes` (429), `resend_cooldown` (429), `send_limit_reached` (409), `challenge_closed` (400) and `invalid_or_expired_code` (400) belong to the code steps; `codes_unavailable` (503) means `INVITE_CODE_PEPPER` is missing; `validation_error` (422) lists field names and safe details. On the payment route, `phone_required` (422) means the M-Pesa number is missing.
 
-```json
-{
-	"error": {
-		"code": "validation_error",
-		"message": "Request validation failed",
-		"fields": ["password"],
-		"details": [
-			{
-				"field": "password",
-				"message": "Value error, Password must contain an uppercase letter; a symbol"
-			}
-		]
-	}
-}
-```
-
-The response describes failed rules but never includes the submitted password. Authentication error codes: `invalid_credentials` (`401`) is identical for unknown, incorrect-password, and disabled accounts; `password_change_required` (`403`) blocks other authenticated routes until a forced password change is done (the seeded super admin's first login); `forbidden` (`403`) indicates a role or super-admin failure; `rate_limited` (`429`) covers IP and per-identifier throttles; `conflict` (`409`) is the generic duplicate-account response; `validation_error` (`422`) lists field names and safe validation details.
 ### Invites and password reset
 
-These public routes need no token. Codes are 8 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`, shown in emails as `XXXX-XXXX`; spaces, hyphens and lower case are accepted. A code is never put in a URL, a subject line, a response or a log. When `INVITE_CODE_PEPPER` is not set, all four return 503 `codes_unavailable`.
+These public routes need no token. When `INVITE_CODE_PEPPER` is not set, all four return 503 `codes_unavailable`.
 
 `POST /auth/accept-invite` (5 per minute per IP). Body, unknown fields rejected:
 
@@ -868,7 +945,7 @@ These public routes need no token. Codes are 8 characters from `ABCDEFGHJKMNPQRS
 {"email": "grace@example.com", "code": "K7QX-2MPA", "password": "A-long-private-passw0rd"}
 ```
 
-The password policy is checked first (admin rules) and a failure returns 422 `password_too_weak` that reveals nothing about any invite. The attempt is then counted in its own committed transaction, so a failed guess always counts; after `INVITE_MAX_ATTEMPTS` (10) wrong codes in total, across all resends, the invite is locked and even the correct code is refused. A correct code claims the invite and creates the admin in one transaction: `role=admin`, `is_super_admin=false`, `must_change_password=false`, `created_by` = the inviting super admin. The response is 201 with the user projection (`is_super_admin: false`), and the new admin logs in normally. An unknown email, a wrong code, an expired code or invite, a used, revoked or locked invite and a duplicate phone or email all return the same response:
+The password policy is checked first (admin rules) and a failure returns 422 `password_too_weak` that reveals nothing about any invite. The attempt is then counted in its own committed transaction, so a failed guess always counts; after `INVITE_MAX_ATTEMPTS` (10) wrong codes in total, across all resends, the invite is locked and even the correct code is refused. A correct code claims the invite and creates the admin in one transaction: `role=admin`, `is_super_admin=false`, `must_change_password=false`, `email_verified_at=now()`, `password_changed_at=now()`, `created_by` = the inviting super admin. The response is 201 `AuthResult` with `status: "signed_in"`: the invite code proves control of the email, so no sign in code follows. An unknown email, a wrong code, an expired code or invite, a used, revoked or locked invite and an email that got an account in the meantime all return the same response:
 
 ```json
 {"error": {"code": "invalid_or_expired_code", "message": "The code is invalid or has expired."}}
@@ -876,6 +953,6 @@ The password policy is checked first (admin rules) and a failure returns 422 `pa
 
 `POST /auth/invite/request-code` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an invitation exists for this address, a new code has been sent."}`. When a pending, unlocked, unexpired invite exists and the cooldown and send cap allow it, a new code replaces the old one (attempts are not reset) and the email is sent in a background task after the response.
 
-`POST /auth/password-reset/request` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an account with this email exists, a reset code has been sent."}`. For an enabled account with that email, at most `RESET_MAX_REQUESTS_PER_HOUR` (3) codes are issued per hour and not within `INVITE_RESEND_COOLDOWN_SECONDS` of the previous one; a new code supersedes the active one and is emailed in a background task. Farmers and buyers who registered without an email cannot use this flow.
+`POST /auth/password-reset/request` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an account with this email exists, a reset code has been sent."}`. It covers every enabled account, since every account has an email. At most `RESET_MAX_REQUESTS_PER_HOUR` (3) codes are issued per hour and not within `INVITE_RESEND_COOLDOWN_SECONDS` of the previous one; a new code supersedes the active one and is emailed in a background task.
 
-`POST /auth/password-reset/confirm` (5 per minute per IP) with `{"email", "code", "new_password"}` returns 204. It uses the same two steps as accepting an invite (the attempt is committed first; the code locks after `RESET_MAX_ATTEMPTS` (5) wrong tries; the code is single use and expires after `RESET_CODE_TTL_MINUTES` (15)). On success the password is replaced, `must_change_password` is cleared and `password_changed_at` is set, so older tokens stop working. Every failure, including an unknown email and a disabled account, returns the same 400 `invalid_or_expired_code`. The password policy follows the account's role.
+`POST /auth/password-reset/confirm` (5 per minute per IP) with `{"email", "code", "new_password"}` returns 204. It uses the same two steps as accepting an invite (the attempt is committed first; the code locks after `RESET_MAX_ATTEMPTS` (5) wrong tries; the code is single use and expires after `RESET_CODE_TTL_MINUTES` (15)). On success the password is replaced, `must_change_password` is cleared and `password_changed_at` is set, so older tokens stop working. The user then signs in with the new password and, for the roles in `LOGIN_OTP_ROLES`, a sign in code. Every failure, including an unknown email and a disabled account, returns the same 400 `invalid_or_expired_code`. The password policy follows the account's role.

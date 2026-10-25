@@ -12,15 +12,27 @@ async def fake_db():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["farmer", "buyer"])
-@pytest.mark.parametrize("extra", ["role", "is_super_admin", "is_disabled", "must_change_password"])
+@pytest.mark.parametrize(
+    "extra", ["role", "is_super_admin", "is_disabled", "must_change_password", "phone_number", "email_verified_at"]
+)
 async def test_registration_rejects_privileged_fields(api_client, application, path, extra) -> None:
     application.dependency_overrides[get_db] = fake_db
-    body = {"name": "Ada Farmer", "phone_number": "0712345678", "password": "Secret123", extra: True}
+    body = {"name": "Ada Farmer", "email": "ada@example.com", "password": "Secret123!", extra: True}
     response = await api_client.post(f"/api/v1/auth/register/{path}", json=body)
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
     assert extra in response.json()["error"]["fields"]
-    assert "Secret123" not in response.text
+    assert "Secret123!" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_registration_requires_an_email(api_client, application) -> None:
+    application.dependency_overrides[get_db] = fake_db
+    response = await api_client.post(
+        "/api/v1/auth/register/farmer", json={"name": "Ada Farmer", "password": "Secret123!"}
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["fields"] == ["email"]
 
 
 @pytest.mark.asyncio
@@ -29,7 +41,7 @@ async def test_registration_rejects_password_length_without_echo(api_client, app
     application.dependency_overrides[get_db] = fake_db
     response = await api_client.post(
         "/api/v1/auth/register/farmer",
-        json={"name": "Ada Farmer", "phone_number": "0712345678", "password": password},
+        json={"name": "Ada Farmer", "email": "ada@example.com", "password": password},
     )
     assert response.status_code == 422
     assert password not in response.text
@@ -53,7 +65,7 @@ async def test_registration_reports_missing_password_requirements(
     application.dependency_overrides[get_db] = fake_db
     response = await api_client.post(
         "/api/v1/auth/register/farmer",
-        json={"name": "Ada Farmer", "phone_number": "0712345678", "password": password},
+        json={"name": "Ada Farmer", "email": "ada@example.com", "password": password},
     )
     assert response.status_code == 422
     error = response.json()["error"]

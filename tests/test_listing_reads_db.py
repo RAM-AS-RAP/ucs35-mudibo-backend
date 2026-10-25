@@ -15,9 +15,10 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from response_helpers import without_request_id
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.security import create_access_token, decode_access_token, hash_password
 from app.db import get_db, get_engine, get_session_factory
@@ -64,7 +65,8 @@ def auth(user: User) -> dict[str, str]:
 async def make_user(session: AsyncSession, role: UserRole, **values) -> User:
     user = User(
         name=f"Test {role.value}",
-        phone_number=f"2547{secrets.randbelow(10**8):08d}",
+        email=values.pop("email", f"zz-test-{role.value}-{secrets.token_hex(4)}@example.com"),
+        email_verified_at=func.now(),
         password_hash=values.pop("password_hash", "not-a-real-hash"),
         role=role,
         **values,
@@ -118,8 +120,10 @@ def delta(after: dict[str, int], before: dict[str, int]) -> dict[str, int]:
 
 
 async def test_login_and_me_return_the_super_admin_flag_from_the_row(
-    db_client: AsyncClient, db_session: AsyncSession
+    db_client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The emailed code step is covered elsewhere; here a correct password signs in directly.
+    monkeypatch.setattr(get_settings(), "login_otp_roles", "")
     password_hash = hash_password(PASSWORD)
     super_admin = await db_session.scalar(select(User).where(User.is_super_admin.is_(True)))
     if super_admin is None:
@@ -135,8 +139,8 @@ async def test_login_and_me_return_the_super_admin_flag_from_the_row(
         assert me.json()["is_super_admin"] is expected
     auth_service.get_login_throttle().reset()
     login = await auth_service.login(db_session, ordinary.email, PASSWORD)
-    assert login["is_super_admin"] is False
-    assert "is_super_admin" not in decode_access_token(login["access_token"])
+    assert login.status == "signed_in" and login.is_super_admin is False
+    assert "is_super_admin" not in decode_access_token(login.access_token)
 
 
 # GET /listings/mine/{listing_id} -------------------------------------------------------------

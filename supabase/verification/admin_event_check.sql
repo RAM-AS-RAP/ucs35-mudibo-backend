@@ -52,11 +52,11 @@ declare
     v_order uuid;
     v_payment uuid;
 begin
-    insert into public.users (name, phone_number, password_hash, role)
-    values ('Verification Farmer', '254700000901', 'not-a-hash', 'farmer')
+    insert into public.users (name, email, password_hash, role, email_verified_at)
+    values ('Verification Farmer', 'verification-event-farmer@example.test', 'not-a-hash', 'farmer', now())
     returning id into v_farmer;
-    insert into public.users (name, phone_number, password_hash, role)
-    values ('Verification Buyer', '254700000902', 'not-a-hash', 'buyer')
+    insert into public.users (name, email, password_hash, role, email_verified_at)
+    values ('Verification Buyer', 'verification-event-buyer@example.test', 'not-a-hash', 'buyer', now())
     returning id into v_buyer;
     insert into public.produce_listings (farmer_id, crop, market, quantity_available, price_per_unit)
     values (v_farmer, 'maize', (select market_name from public.market_locations limit 1), 10, 50)

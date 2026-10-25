@@ -36,6 +36,9 @@ from app.services import order_service, payment_service
 
 pytestmark = pytest.mark.db
 
+# The number entered for a payment; accounts have no phone number.
+PAY_PHONE = "254712000555"
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def dispose_engine_after_test() -> AsyncIterator[None]:
@@ -78,7 +81,8 @@ class AcceptingDaraja:
 async def make_user(session: AsyncSession, role: UserRole, name: str | None = None) -> User:
     user = User(
         name=name or f"Test {role.value}",
-        phone_number=f"2547{secrets.randbelow(10**8):08d}",
+        email=f"zz-test-{role.value}-{secrets.token_hex(4)}@example.com",
+        email_verified_at=func.now(),
         password_hash="not-a-real-hash",
         role=role,
     )
@@ -131,8 +135,8 @@ def payment_for(order: Order, buyer: User, **overrides) -> Payment:
     values = {
         "order_id": order.id,
         "idempotency_key": f"key-{uuid4()}",
-        "phone_number": buyer.phone_number,
-        "stk_phone_number": buyer.phone_number,
+        "phone_number": PAY_PHONE,
+        "stk_phone_number": PAY_PHONE,
         "amount": order.total_amount,
         "status": PaymentStatus.INITIATING,
     }
@@ -182,9 +186,11 @@ async def test_success_flow_end_to_end_with_the_real_triggers(db_session: AsyncS
     created = await order_service.create_order(db_session, buyer, listing.id, Decimal("2"))
     daraja = AcceptingDaraja()
 
-    started = await payment_service.initiate_payment(db_session, factory, daraja, buyer, created.id, "db-flow-key-0001")
+    started = await payment_service.initiate_payment(
+        db_session, factory, daraja, buyer, created.id, "db-flow-key-0001", PAY_PHONE
+    )
 
-    assert started.stk_target_masked.endswith(buyer.phone_number[-3:])
+    assert started.stk_target_masked.endswith(PAY_PHONE[-3:])
     payment = await db_session.scalar(
         select(Payment).where(Payment.order_id == created.id).execution_options(populate_existing=True)
     )
@@ -297,12 +303,11 @@ async def closed_payment(session: AsyncSession, order: Order, buyer: User, phone
     await session.commit()
 
 
-async def test_the_entered_number_is_stored_and_never_saved_to_the_user(
+async def test_the_entered_number_is_stored_on_the_payment_only(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     limit_settings(monkeypatch)
     buyer = await make_user(db_session, UserRole.BUYER)
-    profile_phone = buyer.phone_number
     order = await make_order(db_session, buyer)
 
     await payment_service.initiate_payment(
@@ -313,7 +318,28 @@ async def test_the_entered_number_is_stored_and_never_saved_to_the_user(
         select(Payment).where(Payment.order_id == order.id).execution_options(populate_existing=True)
     )
     assert (payment.phone_number, payment.stk_phone_number) == ("254711222333", "254711222333")
-    assert (await reload(db_session, User, buyer.id)).phone_number == profile_phone
+    columns = await db_session.scalar(
+        text(
+            "select count(*) from information_schema.columns"
+            " where table_schema = 'public' and table_name = 'users' and column_name = 'phone_number'"
+        )
+    )
+    assert columns == 0
+
+
+async def test_a_missing_number_is_phone_required_before_anything_is_stored(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limit_settings(monkeypatch)
+    buyer = await make_user(db_session, UserRole.BUYER)
+    order = await make_order(db_session, buyer)
+    with pytest.raises(AppError) as exc_info:
+        await payment_service.initiate_payment(
+            db_session, factory_for(db_session), AcceptingDaraja(), buyer, order.id, "missing-key-0001", None
+        )
+    assert exc_info.value.code == "phone_required"
+    count = await db_session.scalar(select(func.count(Payment.id)).where(Payment.order_id == order.id))
+    assert count == 0
 
 
 async def test_test_msisdn_mode_lets_two_buyers_with_different_numbers_pay(
@@ -388,7 +414,7 @@ async def test_concurrent_payments_for_two_orders_of_one_buyer_respect_the_buyer
         async with sessionmaker() as session:
             try:
                 await payment_service.initiate_payment(
-                    session, sessionmaker, AcceptingDaraja(), buyer, order.id, key, buyer.phone_number
+                    session, sessionmaker, AcceptingDaraja(), buyer, order.id, key, PAY_PHONE
                 )
             except AppError as exc:
                 return exc.code

@@ -111,6 +111,9 @@ def pay_db(
 
 
 async def post_pay(api_client, order_id, headers=PAY_HEADERS, **kwargs):
+    """POST /pay; the M-Pesa number is required, so the buyer's number is sent unless a body is given."""
+    if "json" not in kwargs and "content" not in kwargs:
+        kwargs["json"] = {"phone_number": BUYER_PHONE}
     return await api_client.post(f"/api/v1/orders/{order_id}/pay", headers=headers, **kwargs)
 
 

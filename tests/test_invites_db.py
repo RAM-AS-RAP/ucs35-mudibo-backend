@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.codes import hash_code
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.core.security import verify_password
+from app.core.security import decode_access_token, verify_password
 from app.db import get_engine, get_sessionmaker
 from app.integrations import email as email_integration
 from app.models.enums import UserRole
@@ -55,17 +55,14 @@ def mailer(monkeypatch):
     return fake
 
 
-def random_phone() -> str:
-    return f"2547{secrets.randbelow(10**8):08d}"
-
-
 def random_email(prefix: str = "invitee") -> str:
     return f"{prefix}-{secrets.token_hex(4)}@example.com"
 
 
 async def make_user(session: AsyncSession, role: UserRole = UserRole.ADMIN, **values) -> User:
     values.setdefault("name", f"ZZ_TEST_ {role.value}")
-    values.setdefault("phone_number", random_phone())
+    values.setdefault("email", random_email(f"zz-test-{role.value}"))
+    values.setdefault("email_verified_at", func.now())
     values.setdefault("password_hash", "not-a-real-hash")
     user = User(role=role, **values)
     session.add(user)
@@ -74,11 +71,7 @@ async def make_user(session: AsyncSession, role: UserRole = UserRole.ADMIN, **va
 
 
 async def create_invite(session: AsyncSession, inviter: User, mailer: FakeMailer, **body):
-    request = CreateInviteRequest(
-        name=body.get("name", "Grace Admin"),
-        phone_number=body.get("phone_number", random_phone()),
-        email=body.get("email", random_email()),
-    )
+    request = CreateInviteRequest(name=body.get("name", "Grace Admin"), email=body.get("email", random_email()))
     out = await invite_service.create_invite(session, inviter, request)
     return out, request, mailer.code()
 
@@ -101,28 +94,29 @@ async def expect_generic_failure(coroutine) -> None:
 # Invites -------------------------------------------------------------------------------------
 
 
-async def test_full_invite_flow_creates_an_admin_who_logs_in(db_session: AsyncSession, mailer) -> None:
+async def test_full_invite_flow_creates_a_signed_in_admin(db_session: AsyncSession, mailer) -> None:
     inviter = await make_user(db_session)
     out, request, code = await create_invite(db_session, inviter, mailer)
 
     stored = await invite_row(db_session, out.id)
     assert stored["code_hash"] == hash_code("invite", out.id, code) and code not in stored["code_hash"]
     assert (stored["send_count"], stored["attempts"], stored["created_by"]) == (1, 0, inviter.id)
+    assert "phone_number" not in stored
 
-    user = await invite_service.accept_invite(db_session, accept(request.email, code.lower()))
-    created = await db_session.scalar(
-        select(User).where(User.id == user["id"]).execution_options(populate_existing=True)
-    )
+    result = await invite_service.accept_invite(db_session, accept(request.email, code.lower()))
+    assert result.status == "signed_in" and result.is_super_admin is False and result.role == "admin"
+    user_id = UUID(decode_access_token(result.access_token)["sub"])
+    created = await db_session.scalar(select(User).where(User.id == user_id).execution_options(populate_existing=True))
     assert (created.role, created.is_super_admin, created.must_change_password) == (UserRole.ADMIN, False, False)
-    assert user["is_super_admin"] is False
     assert created.created_by == inviter.id and created.password_changed_at is not None
+    assert created.email == request.email and created.email_verified_at is not None
     assert verify_password(created.password_hash, PASSWORD)
     assert (await invite_row(db_session, out.id))["used_at"] is not None
 
+    # A later password sign in needs the emailed sign in code.
     auth_service.get_login_throttle().reset()
     login = await auth_service.login(db_session, request.email, PASSWORD)
-    assert login["must_change_password"] is False
-    assert login["is_super_admin"] is False
+    assert login.status == "code_required" and login.access_token is None
     await expect_generic_failure(invite_service.accept_invite(db_session, accept(request.email, code)))
 
 
@@ -150,14 +144,13 @@ async def test_every_failure_type_is_the_same_400(db_session: AsyncSession, mail
     await db_session.execute(
         text(
             "insert into public.admin_invites"
-            " (id, email, name, phone_number, code_hash, code_expires_at, created_by, expires_at)"
-            " values (:id, :email, 'Expired', :phone, :hash, now() + interval '10 minutes', :by,"
+            " (id, email, name, code_hash, code_expires_at, created_by, expires_at)"
+            " values (:id, :email, 'Expired', :hash, now() + interval '10 minutes', :by,"
             "         now() - interval '1 minute')"
         ),
         {
             "id": invite_id,
             "email": email,
-            "phone": random_phone(),
             "hash": hash_code("invite", invite_id, expired_code),
             "by": inviter.id,
         },
@@ -236,7 +229,8 @@ async def test_an_existing_user_blocks_the_invite(db_session: AsyncSession, mail
 async def test_a_unique_violation_leaves_the_invite_unused(db_session: AsyncSession, mailer) -> None:
     inviter = await make_user(db_session)
     out, request, code = await create_invite(db_session, inviter, mailer)
-    await make_user(db_session, UserRole.BUYER, phone_number=request.phone_number)
+    # An account with the invited email appears after the invite was created.
+    await make_user(db_session, UserRole.BUYER, email=request.email)
     await expect_generic_failure(invite_service.accept_invite(db_session, accept(request.email, code)))
     assert (await invite_row(db_session, out.id))["used_at"] is None
 
@@ -268,16 +262,11 @@ async def test_constraints_and_triggers(db_session: AsyncSession, mailer) -> Non
     out, request, _ = await create_invite(db_session, inviter, mailer)
     insert = (
         "insert into public.admin_invites"
-        " (email, name, phone_number, code_hash, code_expires_at, created_by, expires_at)"
-        " values (:email, 'Second', :phone, 'hash', now(), :by, now() + interval '1 day')"
+        " (email, name, code_hash, code_expires_at, created_by, expires_at)"
+        " values (:email, 'Second', 'hash', now(), :by, now() + interval '1 day')"
     )
-    await expect_database_error(db_session, insert, {"email": request.email, "phone": random_phone(), "by": inviter.id})
-    await expect_database_error(
-        db_session, insert, {"email": random_email(), "phone": request.phone_number, "by": inviter.id}
-    )
-    await expect_database_error(
-        db_session, insert, {"email": "Upper@Example.com", "phone": random_phone(), "by": inviter.id}
-    )
+    await expect_database_error(db_session, insert, {"email": request.email, "by": inviter.id})
+    await expect_database_error(db_session, insert, {"email": "Upper@Example.com", "by": inviter.id})
     update = "update public.admin_invites set {} where id = :id"
     await expect_database_error(db_session, update.format("send_count = 6"), {"id": out.id})
     await db_session.execute(text(update.format("attempts = 3")), {"id": out.id})
@@ -351,7 +340,7 @@ async def test_password_reset_end_to_end(db_session: AsyncSession, mailer) -> No
     assert verify_password(stored.password_hash, new_password)
     assert stored.must_change_password is False and stored.password_changed_at is not None
     auth_service.get_login_throttle().reset()
-    assert (await auth_service.login(db_session, email, new_password))["role"] == "farmer"
+    assert (await auth_service.login(db_session, email, new_password)).status == "code_required"
     # Single use.
     await expect_generic_failure(
         password_reset_service.confirm_reset(
@@ -472,9 +461,7 @@ async def test_two_concurrent_accepts_create_exactly_one_user(mailer) -> None:
         results = await asyncio.gather(attempt(), attempt())
         assert sorted(results) == ["created", "invalid_or_expired_code"]
         async with factory() as session:
-            count = await session.scalar(
-                select(func.count()).select_from(User).where(User.phone_number == request.phone_number)
-            )
+            count = await session.scalar(select(func.count()).select_from(User).where(User.email == request.email))
             assert count == 1
     finally:
         async with factory() as session:
@@ -482,8 +469,8 @@ async def test_two_concurrent_accepts_create_exactly_one_user(mailer) -> None:
             await session.execute(
                 text(
                     "update public.users set is_disabled = true, disabled_at = now()"
-                    " where (id = :inviter or phone_number = :phone) and not is_super_admin"
+                    " where (id = :inviter or email = :email) and not is_super_admin"
                 ),
-                {"inviter": inviter.id, "phone": request.phone_number},
+                {"inviter": inviter.id, "email": request.email},
             )
             await session.commit()

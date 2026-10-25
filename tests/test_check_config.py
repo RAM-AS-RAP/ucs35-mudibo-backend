@@ -163,6 +163,68 @@ def test_no_value_is_ever_printed() -> None:
             assert fragment not in printed
 
 
+@pytest.mark.parametrize(
+    ("roles", "production", "expected"),
+    [
+        (None, True, OK),
+        ("farmer,buyer,admin", True, OK),
+        ("admin", True, OK),
+        ("farmer,buyer", True, INVALID),
+        ("", True, INVALID),
+        ("farmer,buyer", False, WEAK),
+        ("farmer,owner", False, INVALID),
+    ],
+)
+def test_login_otp_roles_production_rule(roles, production, expected) -> None:
+    env = valid_production() if production else {**valid_production(), "APP_ENV": "development"}
+    if roles is not None:
+        env["LOGIN_OTP_ROLES"] = roles
+    assert status_of(env, "LOGIN_OTP_ROLES") == expected
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("REG_MAX_SENDS", "6"),
+        ("LOGIN_MAX_SENDS", "0"),
+        ("REG_TTL_MINUTES", "five"),
+        ("LOGIN_RESEND_COOLDOWN_SECONDS", "5"),
+        ("LOGIN_CHALLENGES_PER_HOUR", "1000"),
+    ],
+)
+def test_code_limits_out_of_range_are_invalid_and_named_without_values(setting, value) -> None:
+    env = {**valid_production(), setting: value}
+    check = next(c for c in run_checks(env) if c.item == "REG_* and LOGIN_* limits")
+    assert check.status == INVALID and setting in check.note
+    out = io.StringIO()
+    assert main(env, env_file=None, out=out) == 1
+    assert f"={value}" not in out.getvalue()
+
+
+def test_access_token_expiry_range_is_checked() -> None:
+    assert status_of({**valid_production(), "ACCESS_TOKEN_EXPIRE_MINUTES": "480"}, "ACCESS_TOKEN_EXPIRE_MINUTES") == OK
+    assert status_of({**valid_production(), "ACCESS_TOKEN_EXPIRE_MINUTES": "2000"}, "ACCESS_TOKEN_EXPIRE_MINUTES") == (
+        INVALID
+    )
+
+
+def test_identity_values_are_never_printed() -> None:
+    env = {
+        **valid_production(),
+        "LOGIN_OTP_ROLES": "farmer,buyer,admin",
+        "REG_RESEND_COOLDOWN_SECONDS": "77",
+        "LOGIN_CHALLENGES_PER_HOUR": "13",
+        "SEED_ADMIN_EMAIL": "owner-address@agrisence.test",
+        "DEMO_EMAIL_BASE": "someone@gmail.example",
+    }
+    out = io.StringIO()
+    main(env, env_file=None, out=out)
+    printed = out.getvalue()
+    for value in ("farmer,buyer,admin", "owner-address@agrisence.test", "someone@gmail.example"):
+        assert value not in printed
+    assert "SEED_ADMIN_PHONE" not in printed
+
+
 def test_env_file_is_read_with_lower_precedence(tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text('JWT_SECRET="from-file"\nAPP_ENV=staging\n# comment\n', encoding="utf-8")

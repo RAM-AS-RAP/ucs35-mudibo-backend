@@ -31,7 +31,17 @@ _STATUS_CODES = {
 }
 
 # Validation messages for these fields are dropped if they ever contain the submitted value.
-_SENSITIVE_FIELDS = {"password", "current_password", "new_password", "code", "token", "identifier", "phone_number"}
+_SENSITIVE_FIELDS = {
+    "password",
+    "current_password",
+    "new_password",
+    "code",
+    "token",
+    "registration_token",
+    "challenge_token",
+    "email",
+    "phone_number",
+}
 
 # SQLSTATE values that mean "try again shortly": lock timeout, deadlock, serialization failure.
 BUSY_SQLSTATES = {"55P03", "40P01", "40001"}
@@ -60,7 +70,7 @@ class ConflictError(ServiceError):
 class InvalidCredentials(ServiceError):
     status_code = 401
     code = "invalid_credentials"
-    message = "Invalid identifier or password"
+    message = "Invalid email or password"
 
 
 class TooManyAttempts(ServiceError):
@@ -154,9 +164,7 @@ def database_error_response(exc: BaseException) -> JSONResponse:
     kind = classify_database_error(exc)
     if kind == "busy":
         logger.warning("database busy: %s sqlstate=%s", type(exc).__name__, _sqlstate(exc))
-        return error_response(
-            503, "busy", "The service is busy. Please try again.", headers={"Retry-After": "1"}
-        )
+        return error_response(503, "busy", "The service is busy. Please try again.", headers={"Retry-After": "1"})
     if kind == "unavailable":
         logger.warning("database unavailable: %s", type(exc).__name__)
         return error_response(

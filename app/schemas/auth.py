@@ -1,8 +1,19 @@
-"""Authentication request and response schemas."""
+"""Authentication request and response schemas.
+
+Every request body rejects unknown fields, so a client can never send ``role``, ``is_super_admin`` or
+any other flag. The role of a registration comes only from the route. Sign in responses use
+``app.core.auth_result.AuthResult``.
+"""
+
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
-from app.utils.phone import normalize_phone
+CODE_MIN_LENGTH = 4
+CODE_MAX_LENGTH = 20
+# Tokens are secrets.token_urlsafe(32) (43 characters); the bounds only reject obvious garbage.
+TOKEN_MIN_LENGTH = 16
+TOKEN_MAX_LENGTH = 128
 
 
 def validate_password_policy(value: object) -> object:
@@ -28,12 +39,17 @@ def validate_password_policy(value: object) -> object:
     return value
 
 
+def _lower_email(value: object) -> str:
+    return str(value).strip().lower()
+
+
 class RegisterRequest(BaseModel):
+    """Farmer or buyer registration; the account is created only after the emailed code is entered."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=2, max_length=100)
-    phone_number: str
-    email: EmailStr | None = None
+    email: EmailStr
     password: str = Field(min_length=8, max_length=128)
 
     @field_validator("password", mode="before")
@@ -46,26 +62,71 @@ class RegisterRequest(BaseModel):
     def strip_name(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("phone_number")
-    @classmethod
-    def validate_phone(cls, value: str) -> str:
-        return normalize_phone(value)
-
     @field_validator("email")
     @classmethod
-    def normalize_email(cls, value: EmailStr | None) -> str | None:
-        return str(value).lower() if value is not None else None
+    def normalize_email(cls, value: EmailStr) -> str:
+        return _lower_email(value)
 
 
-# Compatibility name for other modules that imported the original schema.
-RegistrationRequest = RegisterRequest
+class RegistrationAccepted(BaseModel):
+    """The identical 202 body of every registration request, whether or not the address has an account."""
+
+    message: str
+    registration_token: str
+    email_masked: str
+    code_expires_at: datetime
+    resend_available_in: int
+
+
+class RegisterVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registration_token: str = Field(min_length=TOKEN_MIN_LENGTH, max_length=TOKEN_MAX_LENGTH)
+    code: str = Field(min_length=CODE_MIN_LENGTH, max_length=CODE_MAX_LENGTH)
+
+
+class RegisterResendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    registration_token: str = Field(min_length=TOKEN_MIN_LENGTH, max_length=TOKEN_MAX_LENGTH)
+
+
+class ResendAccepted(BaseModel):
+    """The identical 202 body of every registration resend request."""
+
+    message: str
+    resend_available_in: int
 
 
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    identifier: str = Field(min_length=3, max_length=254)
+    email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr) -> str:
+        return _lower_email(value)
+
+
+class LoginVerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_token: str = Field(min_length=TOKEN_MIN_LENGTH, max_length=TOKEN_MAX_LENGTH)
+    code: str = Field(min_length=CODE_MIN_LENGTH, max_length=CODE_MAX_LENGTH)
+
+
+class LoginResendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    challenge_token: str = Field(min_length=TOKEN_MIN_LENGTH, max_length=TOKEN_MAX_LENGTH)
+
+
+class LoginResendOut(BaseModel):
+    code_sent: bool
+    resend_available_in: int
+    code_expires_at: datetime
 
 
 class ChangePasswordRequest(BaseModel):
@@ -91,13 +152,3 @@ class PasswordChangedResponse(BaseModel):
 
     message: str
     login_required: bool = True
-
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int
-    role: str
-    # From the users row at login, for the client UI only; the JWT never carries it.
-    is_super_admin: bool
-    must_change_password: bool

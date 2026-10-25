@@ -16,15 +16,15 @@ declare
     v_user uuid;
     v_invite uuid;
 begin
-    insert into public.users (name, phone_number, email, password_hash, role)
-    values ('Verification Admin', '254700000951', 'verification-admin@example.test', 'not-a-hash', 'admin')
+    insert into public.users (name, email, password_hash, role, email_verified_at)
+    values ('Verification Admin', 'verification-admin@example.test', 'not-a-hash', 'admin', now())
     returning id into v_admin;
-    insert into public.users (name, phone_number, email, password_hash, role)
-    values ('Verification Farmer', '254700000952', 'verification-farmer@example.test', 'not-a-hash', 'farmer')
+    insert into public.users (name, email, password_hash, role, email_verified_at)
+    values ('Verification Farmer', 'verification-farmer@example.test', 'not-a-hash', 'farmer', now())
     returning id into v_user;
-    insert into public.admin_invites (email, name, phone_number, code_hash, code_expires_at, created_by, expires_at)
+    insert into public.admin_invites (email, name, code_hash, code_expires_at, created_by, expires_at)
     values (
-        'verification-invite@example.test', 'Verification Invite', '254700000953', 'hash-1',
+        'verification-invite@example.test', 'Verification Invite', 'hash-1',
         now() + interval '15 minutes', v_admin, now() + interval '7 days'
     )
     returning id into v_invite;
@@ -36,9 +36,9 @@ $$;
 do $$
 begin
     begin
-        insert into public.admin_invites (email, name, phone_number, code_hash, code_expires_at, created_by, expires_at)
+        insert into public.admin_invites (email, name, code_hash, code_expires_at, created_by, expires_at)
         values (
-            'verification-invite@example.test', 'Second Invite', '254700000954', 'hash-2',
+            'verification-invite@example.test', 'Second Invite', 'hash-2',
             now() + interval '15 minutes', (select id from check_ids where key = 'admin'), now() + interval '7 days'
         );
         raise exception 'FAIL: a second pending invite for one email was accepted';

@@ -1,4 +1,8 @@
-"""User account table mapping."""
+"""User account table mapping.
+
+An account is identified only by its verified, lower case email address. ``email`` and
+``email_verified_at`` never change once written (a database trigger rejects it).
+"""
 
 from datetime import datetime
 from uuid import UUID
@@ -17,8 +21,8 @@ class User(Base):
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    phone_number: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    email: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    email_verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[UserRole] = mapped_column(user_role_type, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
