@@ -1,19 +1,20 @@
 """Manual end-to-end check of the farmer, buyer and admin journeys against a RUNNING backend, over HTTP.
 
 This is not part of ``pytest``. Start the API first, preferably with rate limits disabled because the run
-registers and logs in several times (registration is limited to 10 per hour and login to 5 per minute
-per IP otherwise):
+registers and signs in several times (registration is limited to 10 per hour, sign in to 5 per minute
+and code verification to 5 or 10 per minute per IP otherwise):
 
-    RATE_LIMITS_DISABLED=1 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+    RATE_LIMITS_DISABLED=1 EMAIL_PROVIDER=console python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
     python scripts/e2e_check.py
 
 Variables (read from the process environment):
 
     E2E_BASE_URL            default http://localhost:8000
     E2E_ALLOW_REMOTE        set to 1 to allow a host other than localhost (for example a deployed API)
-    E2E_ADMIN_IDENTIFIER    the super admin's phone number or email
-    E2E_ADMIN_PASSWORD      the super admin's password (an unchanged seeded password is fine for login,
+    E2E_ADMIN_EMAIL         the super admin's email
+    E2E_ADMIN_PASSWORD      the super admin's password (an unchanged seeded password is fine for sign in,
                             but admin routes then answer 403 password_change_required and are skipped)
+    E2E_MAILBOX_DIR         the console provider's mailbox (default ./.dev_mailbox)
     E2E_ORIGIN              a browser origin the server allows (default: first entry of CORS_ORIGINS)
     E2E_PAYMENTS            skip (default) | simulate | prompt
     E2E_INVITES             skip (default) | console
@@ -21,18 +22,26 @@ Variables (read from the process environment):
     DATABASE_URL            only for E2E_PAYMENTS=simulate, to read the payment's checkout request id
     MPESA_CALLBACK_TOKEN    only for E2E_PAYMENTS=simulate, to post the simulated callback
 
+Sign in. Accounts are email only. Registration and every password sign in need an emailed code, which
+this script reads from the newest file in ``E2E_MAILBOX_DIR`` that contains the recipient's address.
+The auth steps (and so everything that needs a session) therefore run only when the server's
+``EMAIL_PROVIDER`` is ``console`` and the server writes to the same directory; otherwise they are
+skipped with a reason. A resend has a cooldown (``LOGIN_RESEND_COOLDOWN_SECONDS``, 60 by default), and
+the farmer's sign in waits for it once to check that an old code stops working after a resend.
+
 Payment modes. ``simulate`` asks the server for a real sandbox STK push (start the server with
 ``MPESA_STK_TARGET=test_msisdn`` so it goes to the sandbox test number), then posts a simulated success
 callback itself. Daraja may later send its own callback for the same request; the server treats it as a
 duplicate. ``prompt`` waits up to 150 seconds for someone to approve the prompt on the phone. Both send
-the buyer's number as ``{"phone_number": ...}``; ``simulate`` also replays the key with the same number
-(same result), with a different number (409 ``idempotency_key_reused``), and makes one call with no body
-to cover the profile number fallback.
+the number entered for the payment as ``{"phone_number": ...}`` (required); ``simulate`` also checks
+that a missing number is 422 ``phone_required`` and replays the key with the same number (same result)
+and with a different number (409 ``idempotency_key_reused``).
 
 Safety: the script refuses to run when ``APP_ENV`` is ``production`` and, unless ``E2E_ALLOW_REMOTE=1``,
-when the base URL is not localhost. It never prints tokens, passwords, codes or full phone numbers. Test
-users are named ``ZZ_E2E_<random>``; users cannot be deleted (a database rule), so the cleanup disables
-them through the admin API and reports how many disabled ``ZZ_E2E_`` users remain.
+when the base URL is not localhost. It never prints tokens, passwords, codes, full email addresses or
+full phone numbers. Test users are named ``ZZ_E2E_<random>``; users cannot be deleted (a database
+rule), so the cleanup disables them through the admin API and reports how many disabled ``ZZ_E2E_``
+users remain.
 
 Every step is recorded as PASS, FAIL or SKIP with a reason; the exit code is 1 when any step failed.
 """
@@ -60,7 +69,9 @@ PREFIX = "ZZ_E2E_"
 CROPS = ("maize", "beans")
 HORIZONS = ("one_month", "two_month")
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
-CODE_IN_EMAIL = re.compile(r"\b[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}\b")
+CODE_IN_EMAIL = re.compile(r"\b[A-Z2-9]{4}-[A-Z2-9]{4}\b")
+MAILBOX_WAIT_SECONDS = 10
+REGISTRATION_KEYS = {"message", "registration_token", "email_masked", "code_expires_at", "resend_available_in"}
 CALLBACK_PATH = re.compile(r"/payments/callback/[^/?#\s]+")
 DISALLOWED_ORIGIN = "https://zz-e2e-disallowed.example"
 POLL_SECONDS = 3
@@ -90,9 +101,9 @@ class Result:
 class Actor:
     label: str
     name: str
-    phone: str
+    email: str
     password: str
-    email: str | None = None
+    pay_phone: str = ""
     id: str | None = None
     token: str | None = None
 
@@ -103,8 +114,51 @@ class Actor:
         return {"Authorization": f"Bearer {self.token}"}
 
     @property
-    def masked_phone(self) -> str:
-        return f"254*******{self.phone[-3:]}"
+    def masked_pay_phone(self) -> str:
+        return f"254*******{self.pay_phone[-3:]}"
+
+    @property
+    def masked_email(self) -> str:
+        local, _, domain = self.email.partition("@")
+        return f"{local[:1]}***@{domain[:1]}***"
+
+
+class Mailbox:
+    """Reads codes that the console email provider writes, one file per message."""
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def snapshot(self) -> set[Path]:
+        return set(self.directory.glob("*")) if self.directory.is_dir() else set()
+
+    async def code_for(self, recipient: str, before: set[Path]) -> str:
+        """The code in the newest new file that contains ``recipient``; waits for the background send."""
+        deadline = time.monotonic() + MAILBOX_WAIT_SECONDS
+        while True:
+            new_files = sorted(self.snapshot() - before, key=lambda path: path.stat().st_mtime, reverse=True)
+            for path in new_files:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                if recipient.lower() in content.lower():
+                    match = CODE_IN_EMAIL.search(content)
+                    if match is None:
+                        raise StepFailed("the newest email for this address contains no code")
+                    return match.group(0)
+            if time.monotonic() > deadline:
+                raise StepFailed("no new email for this address in the mailbox (is the server on this machine?)")
+            await asyncio.sleep(0.5)
+
+    async def nothing_new_for(self, recipient: str, before: set[Path], wait: float = 1.5) -> bool:
+        await asyncio.sleep(wait)
+        return not any(
+            recipient.lower() in path.read_text(encoding="utf-8", errors="replace").lower()
+            for path in self.snapshot() - before
+        )
+
+
+def other_code(code: str) -> str:
+    """A well formed code that differs from ``code``."""
+    return "AAAA-AAAA" if code.replace("-", "") != "AAAAAAAA" else "BBBB-BBBB"
 
 
 def random_phone() -> str:
@@ -185,15 +239,31 @@ class E2ERun:
             base_url=self.base_url, timeout=30.0, event_hooks={"response": [self._check_headers]}
         )
         suffix = secrets.token_hex(3)
-        self.farmer = Actor("farmer", f"{PREFIX}farmer_{suffix}", random_phone(), random_password())
-        self.buyer = Actor("buyer", f"{PREFIX}buyer_{suffix}", random_phone(), random_password())
-        self.admin = Actor("super admin", "super admin", "", os.environ.get("E2E_ADMIN_PASSWORD", ""))
-        self.invited = Actor(
-            "invited admin",
-            f"{PREFIX}admin_{suffix}",
-            random_phone(),
+        self.farmer = Actor(
+            "farmer", f"{PREFIX}farmer_{suffix}", f"zz_e2e_farmer_{suffix}@example.com", random_password()
+        )
+        self.buyer = Actor(
+            "buyer",
+            f"{PREFIX}buyer_{suffix}",
+            f"zz_e2e_buyer_{suffix}@example.com",
             random_password(),
-            email=f"zz_e2e_{suffix}@example.com",
+            pay_phone=random_phone(),
+        )
+        self.admin = Actor(
+            "super admin",
+            "super admin",
+            os.environ.get("E2E_ADMIN_EMAIL", "").strip().lower(),
+            os.environ.get("E2E_ADMIN_PASSWORD", ""),
+        )
+        self.invited = Actor(
+            "invited admin", f"{PREFIX}admin_{suffix}", f"zz_e2e_admin_{suffix}@example.com", random_password()
+        )
+        self.mailbox = Mailbox(Path(os.environ.get("E2E_MAILBOX_DIR", "./.dev_mailbox")))
+        provider = env_or_dotenv("EMAIL_PROVIDER").strip().lower() or "console"
+        self.auth_skip_reason = (
+            None
+            if provider == "console"
+            else "the server's EMAIL_PROVIDER is not console, so codes cannot be read from the mailbox"
         )
         self.markets: list[str] = []
         self.listing: dict[str, Any] | None = None
@@ -277,35 +347,104 @@ class E2ERun:
 
     # 2. Farmer --------------------------------------------------------------------------------
 
-    async def register_and_login(self, actor: Actor, route: str) -> None:
-        body = {"name": actor.name, "phone_number": actor.phone, "password": actor.password}
-        created = expect(await self.api("POST", f"/auth/register/{route}", json=body), 201)
-        actor.id = created["id"]
-        if created.get("is_super_admin") is not False:
-            raise StepFailed("the registration response does not say is_super_admin false")
-        login = expect(
-            await self.api("POST", "/auth/login", json={"identifier": actor.phone, "password": actor.password}), 200
+    def require_auth_steps(self) -> None:
+        if self.auth_skip_reason:
+            raise StepSkipped(self.auth_skip_reason)
+
+    async def register(self, actor: Actor, route: str) -> None:
+        """Register with an emailed code: same 202 shape twice, a wrong code fails, the right one signs in."""
+        self.require_auth_steps()
+        body = {"name": actor.name, "email": actor.email, "password": actor.password}
+        before = self.mailbox.snapshot()
+        first = expect(await self.api("POST", f"/auth/register/{route}", json=body), 202)
+        if set(first) != REGISTRATION_KEYS:
+            raise StepFailed("the registration response has unexpected fields")
+        code = await self.mailbox.code_for(actor.email, before)
+        # The same address again inside the resend cooldown: the identical shape, a new token, the same code.
+        before_repeat = self.mailbox.snapshot()
+        second = expect(await self.api("POST", f"/auth/register/{route}", json=body), 202)
+        if set(second) != set(first) or second["message"] != first["message"]:
+            raise StepFailed("a repeated registration answered differently")
+        if not await self.mailbox.nothing_new_for(actor.email, before_repeat):
+            raise StepFailed("a repeated registration inside the cooldown sent another code")
+        token = second["registration_token"]
+        wrong = {"registration_token": token, "code": other_code(code)}
+        expect(await self.api("POST", "/auth/register/verify", json=wrong), 400, "invalid_or_expired_code")
+        old = {"registration_token": first["registration_token"], "code": code}
+        expect(await self.api("POST", "/auth/register/verify", json=old), 400, "invalid_or_expired_code")
+        verified = expect(
+            await self.api("POST", "/auth/register/verify", json={"registration_token": token, "code": code}), 201
         )
-        if login["role"] != route:
-            raise StepFailed(f"login role is not {route}")
-        if login.get("is_super_admin") is not False:
-            raise StepFailed("the login response does not say is_super_admin false")
-        actor.token = login["access_token"]
+        if verified.get("status") != "signed_in" or verified.get("role") != route:
+            raise StepFailed(f"verification did not sign in a {route}")
+        if verified.get("is_super_admin") is not False:
+            raise StepFailed("the verification response does not say is_super_admin false")
+        actor.token = verified["access_token"]
+        me = expect(await self.api("GET", "/auth/me", actor), 200)
+        actor.id = me["id"]
+        if me["role"] != route or "phone_number" in me:
+            raise StepFailed("/auth/me does not match the registered account")
+
+    async def sign_in(self, actor: Actor, *, check_wrong_password: bool = False, check_resend: bool = False) -> str:
+        """Password, then the emailed code. Returns a short note."""
+        self.require_auth_steps()
+        actor.token = None  # sign out: tokens are stateless, so the client simply drops it
+        if not actor.email or not actor.password:
+            raise StepSkipped(f"no email or password for the {actor.label}")
+        if check_wrong_password:
+            before = self.mailbox.snapshot()
+            wrong = {"email": actor.email, "password": actor.password + "x"}
+            expect(await self.api("POST", "/auth/login", json=wrong), 401, "invalid_credentials")
+            if not await self.mailbox.nothing_new_for(actor.email, before, wait=1.0):
+                raise StepFailed("a wrong password sent a sign in code")
+        before = self.mailbox.snapshot()
+        credentials = {"email": actor.email, "password": actor.password}
+        body = expect(await self.api("POST", "/auth/login", json=credentials), 200)
+        if body.get("status") == "signed_in":
+            actor.token = body["access_token"]
+            return "signed in with the password alone (role not in LOGIN_OTP_ROLES)"
+        if body.get("status") != "code_required" or "access_token" in body:
+            raise StepFailed("sign in did not ask for a code")
+        if not body.get("code_sent"):
+            raise StepFailed("the server could not send the sign in code")
+        challenge = body["challenge_token"]
+        code = await self.mailbox.code_for(actor.email, before)
+        note = "password and code"
+        if check_resend:
+            await asyncio.sleep(max(0, int(body.get("resend_available_in", 0))) + 1)
+            before_resend = self.mailbox.snapshot()
+            resent = expect(await self.api("POST", "/auth/login/resend", json={"challenge_token": challenge}), 200)
+            if not resent.get("code_sent"):
+                raise StepFailed("the resend did not send a code")
+            new_code = await self.mailbox.code_for(actor.email, before_resend)
+            if new_code != code:
+                old = {"challenge_token": challenge, "code": code}
+                expect(await self.api("POST", "/auth/login/verify", json=old), 400, "invalid_or_expired_code")
+            code = new_code
+            note = "password and code; the previous code failed after a resend"
+        verified = expect(
+            await self.api("POST", "/auth/login/verify", json={"challenge_token": challenge, "code": code}), 200
+        )
+        if verified.get("status") != "signed_in":
+            raise StepFailed("the code did not sign in")
+        actor.token = verified["access_token"]
+        return note
 
     async def farmer_journey(self) -> None:
         farmer = self.farmer
 
-        async def role_in_body() -> str:
-            body = {"name": farmer.name, "phone_number": farmer.phone, "password": farmer.password, "role": "admin"}
-            expect(await self.api("POST", "/auth/register/farmer", json=body), 422)
-            return "422 for a body with role"
+        async def forbidden_fields() -> str:
+            base = {"name": farmer.name, "email": farmer.email, "password": farmer.password}
+            for extra in ({"role": "admin"}, {"phone_number": "0712345678"}):
+                expect(await self.api("POST", "/auth/register/farmer", json={**base, **extra}), 422)
+            return "422 for a body with role or phone_number"
 
         async def register() -> str:
-            await self.register_and_login(farmer, "farmer")
-            me = expect(await self.api("GET", "/auth/me", farmer), 200)
-            if me["id"] != farmer.id or me["role"] != "farmer":
-                raise StepFailed("/auth/me does not match the registered farmer")
-            return f"farmer {farmer.masked_phone}"
+            await self.register(farmer, "farmer")
+            return f"farmer {farmer.masked_email}"
+
+        async def sign_in_again() -> str:
+            return await self.sign_in(farmer, check_wrong_password=True, check_resend=True)
 
         async def markets() -> str:
             body = expect(await self.api("GET", "/markets", farmer), 200)
@@ -388,9 +527,7 @@ class E2ERun:
                 raise StepFailed("/listings/mine does not contain both listings")
             for quantity, status in (("0", "sold_out"), ("25", "active")):
                 edited = expect(
-                    await self.api(
-                        "PATCH", f"/listings/{image['id']}", farmer, data={"quantity_available": quantity}
-                    ),
+                    await self.api("PATCH", f"/listings/{image['id']}", farmer, data={"quantity_available": quantity}),
                     200,
                 )
                 if edited["status"] != status:
@@ -421,8 +558,9 @@ class E2ERun:
             expect(await self.api("GET", "/orders/mine", farmer), 403, "forbidden")
             return "buyer routes answer 403"
 
-        await self.step("farmer", "register with role is 422", role_in_body)
-        if await self.step("farmer", "register, login, me", register):
+        await self.step("farmer", "register with role or phone_number is 422", forbidden_fields)
+        if await self.step("farmer", "register with an emailed code, me", register):
+            await self.step("farmer", "sign out, sign in with password and code", sign_in_again)
             await self.step("farmer", "markets", markets)
             await self.step("farmer", "current prices", current_prices)
             await self.step("farmer", "trends", trends)
@@ -437,8 +575,9 @@ class E2ERun:
         buyer = self.buyer
 
         async def register() -> str:
-            await self.register_and_login(buyer, "buyer")
-            return f"buyer {buyer.masked_phone}"
+            await self.register(buyer, "buyer")
+            note = await self.sign_in(buyer)
+            return f"buyer {buyer.masked_email}; signed in again with {note}"
 
         async def buyer_forbidden() -> str:
             expect(await self.api("GET", "/prices/current", buyer, params={"crop": "maize"}), 403, "forbidden")
@@ -510,7 +649,7 @@ class E2ERun:
             expect(await self.api("GET", f"/orders/{self.order['id']}", buyer), 200)
             return f"total {expected_total} KES, 409 on repeat, stock returned on cancel"
 
-        if await self.step("buyer", "register and login", register):
+        if await self.step("buyer", "register, sign out, sign in with password and code", register):
             await self.step("buyer", "prices and forecasts forbidden", buyer_forbidden)
             await self.step("buyer", "browse and detail", browse)
             await self.step("buyer", "markets filter", browse_markets)
@@ -547,7 +686,7 @@ class E2ERun:
     async def pay(
         self, key: str, phone: str | None = None, status: int = 202, code: str | None = None
     ) -> dict[str, Any]:
-        """POST /pay with the M-Pesa number in the body, or with no body at all when ``phone`` is None."""
+        """POST /pay with the M-Pesa number in the body, or with no body at all when ``phone`` is None (422)."""
         assert self.order is not None
         kwargs: dict[str, Any] = {"headers": {"Idempotency-Key": key}}
         if phone is not None:
@@ -560,18 +699,16 @@ class E2ERun:
         token = os.environ.get("MPESA_CALLBACK_TOKEN", "")
         if not database_url or not token:
             raise StepSkipped("simulate needs DATABASE_URL and MPESA_CALLBACK_TOKEN")
+        # The number is required: no body is 422 phone_required before anything is stored.
+        await self.pay(str(uuid4()), None, 422, "phone_required")
         key = str(uuid4())
-        first = await self.pay(key, self.buyer.phone)
-        if first["payment"]["phone_masked"] != self.buyer.masked_phone:
+        first = await self.pay(key, self.buyer.pay_phone)
+        if first["payment"]["phone_masked"] != self.buyer.masked_pay_phone:
             raise StepFailed("the payment does not show the entered number (masked)")
-        replay = await self.pay(key, self.buyer.phone)
+        replay = await self.pay(key, self.buyer.pay_phone)
         if replay["payment"]["attempts"] != first["payment"]["attempts"] or replay["status"] != first["status"]:
             raise StepFailed("replaying the Idempotency-Key with the same number created another payment")
-        await self.pay(key, different_phone(self.buyer.phone), 409, "idempotency_key_reused")
-        # A new key with no body resolves the number from the profile (the temporary fallback). The open
-        # payment then answers payment_in_progress, so no second prompt is sent and no attempt is used;
-        # a broken fallback would answer 422 phone_required instead.
-        await self.pay(str(uuid4()), None, 409, "payment_in_progress")
+        await self.pay(key, different_phone(self.buyer.pay_phone), 409, "idempotency_key_reused")
         checkout_id, amount = await read_latest_payment(database_url, self.order["id"])
         if not checkout_id:
             raise StepFailed("the payment has no checkout request id")
@@ -600,21 +737,26 @@ class E2ERun:
         item = next((row for row in body["items"] if row["order_id"] == self.order["id"]), None)
         if item is None or item["status"] != "paid":
             raise StepFailed("the farmer does not see the paid order")
-        if self.buyer.phone in farmer_view.text or "phone" in " ".join(item):
+        if (
+            self.buyer.pay_phone in farmer_view.text
+            or self.buyer.email in farmer_view.text
+            or "phone" in " ".join(item)
+            or "email" in " ".join(item)
+        ):
             raise StepFailed("the farmer's order view exposes buyer contact details")
         expect(await self.client.post(f"/api/v1/payments/callback/{token}", json=callback), 200)
         again = expect(await self.api("GET", f"/orders/{self.order['id']}", self.buyer), 200)
         if again["status"] != "paid" or again["payment"]["attempts"] != paid["payment"]["attempts"]:
             raise StepFailed("a repeated callback changed the order")
         return (
-            "paid via simulated callback; same-number replay and duplicate callback changed nothing, "
-            "a different number was refused and the no-body fallback resolved"
+            "paid via simulated callback; no number was 422, same-number replay and duplicate callback "
+            "changed nothing, a different number was refused"
         )
 
     async def prompt_payment(self) -> str:
         if os.environ.get("E2E_CONFIRM_REAL_PROMPT") != "yes":
             raise StepSkipped("set E2E_CONFIRM_REAL_PROMPT=yes; the prompt may reach a real phone")
-        started = await self.pay(str(uuid4()), self.buyer.phone)
+        started = await self.pay(str(uuid4()), self.buyer.pay_phone)
         print(f"Approve the prompt on the phone ({started['payment']['stk_target_masked']}).", flush=True)
         await self.poll_until_paid(PROMPT_TIMEOUT_SECONDS)
         return "paid after the prompt was approved"
@@ -625,26 +767,19 @@ class E2ERun:
         admin = self.admin
 
         async def login() -> str:
-            identifier = os.environ.get("E2E_ADMIN_IDENTIFIER", "")
-            if not identifier or not admin.password:
-                raise StepSkipped("set E2E_ADMIN_IDENTIFIER and E2E_ADMIN_PASSWORD")
-            body = expect(
-                await self.api("POST", "/auth/login", json={"identifier": identifier, "password": admin.password}),
-                200,
-            )
-            if body["role"] != "admin":
-                raise StepFailed("E2E_ADMIN_IDENTIFIER is not an admin")
-            if body.get("is_super_admin") is not True:
-                raise StepFailed("the super admin's login response does not say is_super_admin true")
-            admin.token = body["access_token"]
+            if not admin.email or not admin.password:
+                raise StepSkipped("set E2E_ADMIN_EMAIL and E2E_ADMIN_PASSWORD")
+            note = await self.sign_in(admin)
             me = expect(await self.api("GET", "/auth/me", admin), 200)
             admin.id = me["id"]
+            if me["role"] != "admin":
+                raise StepFailed("E2E_ADMIN_EMAIL is not an admin")
             if me.get("is_super_admin") is not True:
                 raise StepFailed("/auth/me for the super admin does not say is_super_admin true")
-            if body["must_change_password"]:
+            if me["must_change_password"]:
                 raise StepSkipped("the super admin must change the password first; admin routes answer 403")
             self.admin_ready = True
-            return "logged in"
+            return f"signed in with {note}"
 
         async def reads() -> str:
             expect(await self.api("GET", "/admin/stats", admin), 200)
@@ -654,6 +789,8 @@ class E2ERun:
             )
             if self.farmer.id and self.farmer.id not in {item["id"] for item in users["items"]}:
                 raise StepFailed("the e2e farmer is not in the filtered user list")
+            if any("phone_number" in item for item in users["items"]):
+                raise StepFailed("the admin user list still contains phone numbers")
             for path in ("/admin/listings", "/admin/orders", "/admin/payments", "/admin/forecast-accuracy"):
                 expect(await self.api("GET", path, admin), 200)
             return "stats, users, listings, orders, payments, accuracy"
@@ -700,35 +837,29 @@ class E2ERun:
         if not self.admin_ready:
             self.results.append(Result("invites", "invite", SKIP, "no usable super admin session"))
             return
-        await self.step("invites", "invite, accept, log in", self.invite_flow)
+        await self.step("invites", "invite, accept, signed in", self.invite_flow)
 
     async def invite_flow(self) -> str:
         invited = self.invited
-        mailbox = ROOT / ".dev_mailbox"
-        before = set(mailbox.glob("*")) if mailbox.is_dir() else set()
-        body = {"name": invited.name, "phone_number": invited.phone, "email": invited.email}
+        with_phone = {"name": invited.name, "email": invited.email, "phone_number": "0712345678"}
+        expect(await self.api("POST", "/admin/invites", self.admin, json=with_phone), 422)
+        before = self.mailbox.snapshot()
+        body = {"name": invited.name, "email": invited.email}
         created = expect(await self.api("POST", "/admin/invites", self.admin, json=body), 201)
         if not created["email_sent"]:
             raise StepFailed("the invite email was not sent")
-        await asyncio.sleep(0.5)
-        new_files = sorted(set(mailbox.glob("*")) - before, key=lambda path: path.stat().st_mtime)
-        if not new_files:
-            raise StepFailed("no new file in .dev_mailbox/ (is the server on this machine?)")
-        match = CODE_IN_EMAIL.search(new_files[-1].read_text(encoding="utf-8", errors="replace"))
-        if match is None:
-            raise StepFailed("no code found in the newest .dev_mailbox/ file")
-        accept = {"email": invited.email, "code": match.group(0).lower(), "password": invited.password}
-        user = expect(await self.api("POST", "/auth/accept-invite", json=accept), 201)
-        invited.id = user["id"]
-        if user.get("is_super_admin") is not False:
-            raise StepFailed("the accept-invite response does not say is_super_admin false")
-        login = expect(
-            await self.api("POST", "/auth/login", json={"identifier": invited.email, "password": invited.password}),
-            200,
-        )
-        if login.get("is_super_admin") is not False:
-            raise StepFailed("an invited admin logged in with is_super_admin true")
-        invited.token = login["access_token"]
+        if "phone_masked" in created:
+            raise StepFailed("the invite response still carries a phone number")
+        code = await self.mailbox.code_for(invited.email, before)
+        accept = {"email": invited.email, "code": code.lower(), "password": invited.password}
+        accepted = expect(await self.api("POST", "/auth/accept-invite", json=accept), 201)
+        if accepted.get("status") != "signed_in" or not accepted.get("access_token"):
+            raise StepFailed("accepting the invite did not sign the new admin in")
+        if accepted.get("is_super_admin") is not False or accepted.get("role") != "admin":
+            raise StepFailed("the accept-invite response is not an ordinary admin")
+        invited.token = accepted["access_token"]
+        me = expect(await self.api("GET", "/auth/me", invited), 200)
+        invited.id = me["id"]
         expect(await self.api("GET", "/admin/stats", invited), 200)
         first = await self.api("POST", "/auth/accept-invite", json=accept)
         second = await self.api("POST", "/auth/accept-invite", json={**accept, "code": "AAAA-AAAA"})
@@ -737,7 +868,7 @@ class E2ERun:
         if _without_request_id(first.json()) != _without_request_id(second.json()):
             raise StepFailed("a repeated accept is distinguishable from a wrong code")
         expect(await self.api("PATCH", f"/admin/users/{invited.id}/disable", self.admin), 200)
-        return "accepted, logged in, admin route ok, repeat gives the generic 400, disabled"
+        return "accepted and signed in directly, admin route ok, repeat gives the generic 400, disabled"
 
     # 7. Cleanup -------------------------------------------------------------------------------
 
@@ -842,7 +973,10 @@ def main() -> int:
     if refusal:
         print(f"Refusing to run: {refusal}", file=sys.stderr)
         return 2
-    print(f"End-to-end check against {base_url} (tokens, passwords, codes and phone numbers are never shown).")
+    print(
+        f"End-to-end check against {base_url} "
+        "(tokens, passwords, codes, email addresses and phone numbers are never shown)."
+    )
     return asyncio.run(E2ERun(base_url).run())
 
 
