@@ -1,4 +1,4 @@
-"""Password reset by emailed code, for any enabled account that has an email address.
+"""Password reset by emailed code, for any enabled account (every account has a verified email).
 
 ``request_reset`` always leads to the same 202 response; the email is sent in a background task so
 the response time does not show whether the address exists. ``confirm_reset`` uses the same two steps
@@ -6,7 +6,8 @@ as invite acceptance: the attempt is counted in its own committed transaction (l
 ``RESET_MAX_ATTEMPTS`` wrong tries), then one transaction claims the code and sets the new password.
 Every failure, a disabled account and an unknown email return the same 400 ``invalid_or_expired_code``.
 
-Farmers and buyers who registered without an email address cannot use this flow (documented limitation).
+A reset revokes every earlier access token (``password_changed_at``); the next sign in needs the new
+password and, for the roles in ``LOGIN_OTP_ROLES``, an emailed sign in code.
 """
 
 from __future__ import annotations
@@ -24,7 +25,8 @@ from app.core.password_policy import validate_new_password
 from app.core.security import hash_password
 from app.integrations.email_templates import reset_email
 from app.schemas.invite import PasswordResetConfirmRequest
-from app.services.invite_service import deliver_quietly, invalid_code
+from app.services.email_delivery import deliver_quietly
+from app.services.invite_service import invalid_code
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ async def confirm_reset(session: AsyncSession, body: PasswordResetConfirmRequest
     """Set a new password from a valid code; see the module docstring for the two steps."""
     ensure_codes_configured()
     settings = get_settings()
-    # Rules that do not depend on the account (role, name, phone) are checked before the code, so the
+    # Rules that do not depend on the account (role, name) are checked before the code, so the
     # answer reveals nothing about whether the email exists.
     validate_new_password(body.new_password, None, email=body.email)
 
@@ -97,8 +99,7 @@ async def confirm_reset(session: AsyncSession, body: PasswordResetConfirmRequest
             " where u.id = c.user_id and lower(u.email) = :email and u.is_disabled = false"
             "   and c.used_at is null and c.locked_at is null and c.code_expires_at > now()"
             "   and c.attempts < :max_attempts"
-            " returning c.id, c.user_id, c.code_hash, c.attempts, cast(u.role as text) as role, u.name,"
-            "           u.phone_number, u.email"
+            " returning c.id, c.user_id, c.code_hash, c.attempts, cast(u.role as text) as role, u.name, u.email"
         ),
         {"email": body.email, "max_attempts": settings.reset_max_attempts},
     )
@@ -118,13 +119,7 @@ async def confirm_reset(session: AsyncSession, body: PasswordResetConfirmRequest
         raise invalid_code()
     await session.commit()
 
-    validate_new_password(
-        body.new_password,
-        attempt["role"],
-        email=attempt["email"],
-        name=attempt["name"],
-        phone=attempt["phone_number"],
-    )
+    validate_new_password(body.new_password, attempt["role"], email=attempt["email"], name=attempt["name"])
     password_hash = hash_password(body.new_password)
 
     # Step B: claim the code and replace the password together.

@@ -150,9 +150,7 @@ class BodySizeLimitMiddleware:
         if path.startswith(CALLBACK_PREFIX):
             return None
         route = path.rstrip("/")
-        if (method == "POST" and route == "/api/v1/listings") or (
-            method == "PATCH" and _LISTING_ITEM.fullmatch(route)
-        ):
+        if (method == "POST" and route == "/api/v1/listings") or (method == "PATCH" and _LISTING_ITEM.fullmatch(route)):
             return self.max_multipart_bytes
         return self.max_json_bytes
 

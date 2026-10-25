@@ -15,6 +15,7 @@ from typing import Any
 
 from app.core.request_context import get_request_id
 from app.integrations.daraja import redact_callback_url
+from app.integrations.email import mask_email
 from app.utils.phone import mask_phone
 
 ACCESS_LOGGER = "app.access"
@@ -24,7 +25,7 @@ _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
 
 _SENSITIVE_KEY = (
     r"[\w-]*password|[\w-]*passwd|[\w-]*token|authorization|api[-_]?key|[\w-]*secret|passkey|pepper"
-    r"|(?:invite_|reset_|verification_)?code"
+    r"|(?:invite_|reset_|verification_|registration_|login_)?code"
 )
 _KEY_VALUE = re.compile(
     r"(?i)(?<![\w-])(" + _SENSITIVE_KEY + r")(?![\w-])"
@@ -34,15 +35,18 @@ _KEY_VALUE = re.compile(
 _BEARER = re.compile(r"(?i)\b(Bearer)\s+[A-Za-z0-9._~+/=-]+")
 # Kenyan mobile numbers in 2547/2541, +254, 07/01 or bare 9 digit form, not inside a longer digit run.
 _PHONE = re.compile(r"(?<![\d])(?:\+?254|0)?[17]\d{8}(?![\d])")
+# Email addresses; services already log masked addresses, this catches any that slip through.
+_EMAIL = re.compile(r"(?<![\w.%+-])[\w.%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 
 _configured = False
 
 
 def redact_text(value: str) -> str:
-    """Mask secret looking key/value pairs, bearer values, callback tokens and phone numbers."""
+    """Mask secret looking key/value pairs, bearer values, callback tokens, emails and phone numbers."""
     value = _KEY_VALUE.sub(lambda match: f"{match.group(1)}{match.group(2)}***", value)
     value = _BEARER.sub(r"\1 ***", value)
     value = redact_callback_url(value)
+    value = _EMAIL.sub(lambda match: mask_email(match.group(0)), value)
     return _PHONE.sub(lambda match: mask_phone(match.group(0)), value)
 
 

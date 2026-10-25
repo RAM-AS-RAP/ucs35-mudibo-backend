@@ -1,8 +1,13 @@
-"""One-time codes for admin invites and password resets.
+"""One-time email codes (admin invites, password resets, registration, sign in) and opaque tokens.
 
 A code is 8 characters from an alphabet without look-alike characters (no 0/O, 1/I/L). Only an HMAC
-of the code, keyed with ``INVITE_CODE_PEPPER`` and bound to the purpose and the record id, is
-stored. The plain code and its hash are never logged and never returned by any API.
+of the code, keyed with ``INVITE_CODE_PEPPER`` (the setting keeps its historical name but protects
+every email code) and bound to the purpose and the record id, is stored. The plain code and its hash
+are never logged and never returned by any API.
+
+A token (the registration token and the login challenge token) is ``secrets.token_urlsafe(32)``,
+256 random bits. It is stored only as its SHA-256 hex digest: with that much entropy a fast hash is
+enough, because nobody can guess a token to test against the digest. Tokens are never logged.
 """
 
 import hashlib
@@ -18,7 +23,8 @@ from app.core.errors import AppError
 
 CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 CODE_LENGTH = 8
-Purpose = Literal["invite", "reset"]
+TOKEN_BYTES = 32
+Purpose = Literal["invite", "reset", "register", "login"]
 
 # Compared against when no record matches, so an unknown email costs the same HMAC work.
 DUMMY_CODE_HASH = "0" * 64
@@ -29,8 +35,18 @@ def codes_unavailable() -> AppError:
     return AppError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "codes_unavailable",
-        "Invitations and password resets are not configured on this server.",
+        "Email codes are not configured on this server.",
     )
+
+
+def generate_token() -> str:
+    """Return a new opaque token with 256 random bits (URL safe text)."""
+    return secrets.token_urlsafe(TOKEN_BYTES)
+
+
+def hash_token(token: str) -> str:
+    """SHA-256 hex digest of a token; the only form in which a token is stored."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def ensure_codes_configured() -> None:
