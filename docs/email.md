@@ -1,6 +1,8 @@
 # Email setup
 
-The backend sends two kinds of email: admin invitations and password reset codes. Each contains an 8-character code (shown as `XXXX-XXXX`) that is valid for 15 minutes. The code is never in the subject or in a link, and no email contains a password. Sends are never retried automatically.
+The backend sends five kinds of email: registration codes (valid 15 minutes), sign in codes (valid 10 minutes, sent after a correct password), "account exists" notices (no code; sent when someone registers with an address that already has an account), admin invitations and password reset codes (valid 15 minutes). Codes are 8 characters (shown as `XXXX-XXXX`). A code is never in the subject or in a link, no email contains a password or a link carrying a secret, and sends are never retried automatically.
+
+**Email is a hard dependency of sign in.** With the default `LOGIN_OTP_ROLES` every farmer, buyer and admin needs an emailed code to register and to sign in, so a deployment whose email does not leave the host locks everyone out. Sign in codes are sent while the request waits (bounded by `SMTP_TIMEOUT_SECONDS` for every provider); registration, invite request and reset emails go out in background tasks after the response. If email is down, an operator can let an administrator in with `scripts/admin_recovery.py` (see [admin.md](admin.md)).
 
 Choose one provider with `EMAIL_PROVIDER`:
 
@@ -24,7 +26,7 @@ Many free hosting platforms block outbound SMTP ports. Render free web services,
 | `EMAIL_FROM_ADDRESS` | Sender address; required for `smtp`, `resend` and `brevo`. |
 | `EMAIL_REPLY_TO` | Optional reply address. |
 | `FRONTEND_BASE_URL` | Base URL of the web app; emails point to `<FRONTEND_BASE_URL>/accept-invite` and `/reset-password`. Must start with `https://` in production. |
-| `INVITE_CODE_PEPPER` | Secret of at least 32 characters used to HMAC the codes. Without it, the invite and reset routes return 503 `codes_unavailable`. |
+| `INVITE_CODE_PEPPER` | Secret of at least 32 characters used to HMAC every email code (registration, sign in, invites, resets; the name is historical). Without it, every code route returns 503 `codes_unavailable`. |
 
 To change the display name, set `EMAIL_FROM_NAME`, for example `EMAIL_FROM_NAME=AgriSence Support`. Line breaks are refused in every header value.
 
@@ -117,4 +119,4 @@ While SMTP is blocked, email-based password reset does not work on the deployed 
 3. Send a test with `POST /api/v1/admin/email/test`.
 4. Delete the old key or app password in the provider's dashboard.
 
-Rotate immediately if a key may have leaked. Keys and passwords are never logged or returned by the API. Rotating `INVITE_CODE_PEPPER` invalidates every outstanding invite and reset code (resend them afterwards).
+Rotate immediately if a key may have leaked. Keys and passwords are never logged or returned by the API. Rotating `INVITE_CODE_PEPPER` invalidates every outstanding registration, sign in, invite and reset code (users request new ones).

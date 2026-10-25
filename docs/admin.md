@@ -6,13 +6,22 @@ How to operate the platform as an administrator. Endpoint details are in [api.md
 
 There is exactly one super admin. It is created once per environment from the command line, never through the API:
 
-1. Set `SEED_ADMIN_NAME`, `SEED_ADMIN_PHONE`, `SEED_ADMIN_EMAIL` and, optionally, `SEED_ADMIN_PASSWORD` (at least 12 characters) in `.env`.
-2. Run `python -m scripts.seed_admin`. Without `SEED_ADMIN_PASSWORD` it asks for the password twice.
-3. Remove `SEED_ADMIN_PASSWORD` from `.env`, log in, and change the password when asked.
+1. Set `SEED_ADMIN_NAME`, `SEED_ADMIN_EMAIL` and, optionally, `SEED_ADMIN_PASSWORD` (at least 12 characters) in `.env`. There is no phone number.
+2. Run `python -m scripts.seed_admin`. Without `SEED_ADMIN_PASSWORD` it asks for the password twice. The account gets a verified email and must change its password at the first sign in.
+3. Remove `SEED_ADMIN_PASSWORD` from `.env`, sign in, and change the password when asked.
+
+Every admin sign in has two steps: the password, then an 8-character code emailed to the admin's address (production always requires it for admins). So email delivery must work before the first sign in. Configure email (see [email.md](email.md)) and set `INVITE_CODE_PEPPER` (at least 32 random characters, for example from `python -c "import secrets; print(secrets.token_urlsafe(48))"`); the setting keeps its historical name but protects every email code. `POST /api/v1/admin/email/test` checks delivery, but it needs a signed in super admin, so for the very first sign in use `EMAIL_PROVIDER=console` (the code is written to `.dev_mailbox/` on the server's machine) or the recovery script below.
 
 The database protects the super admin: it cannot be disabled, demoted or deleted. No admin can set or see another person's password.
 
-Before inviting anyone, configure email (see [email.md](email.md)) and set `INVITE_CODE_PEPPER` (at least 32 random characters, for example from `python -c "import secrets; print(secrets.token_urlsafe(48))"`). Then check delivery from the deployed server with `POST /api/v1/admin/email/test`, which sends a short message to your own address.
+## Recovery when email is down
+
+`scripts/admin_recovery.py` is an operator tool for the case where an administrator cannot receive email. It refuses to run unless `ALLOW_ADMIN_RECOVERY=1` is set, works only for administrator accounts, and never takes a password or code on the command line. The operator already has database access, so it grants nothing new; use it only when needed and unset the variable afterwards.
+
+- `python -m scripts.admin_recovery issue-login-code --email <admin email>`: for an enabled administrator, creates a sign in challenge exactly like `POST /auth/login` does (it supersedes the active one; the hourly challenge limit is not applied) and prints the challenge token and the code once to the terminal. Enter them with `POST /api/v1/auth/login/verify` (or hand them to the admin over a trusted channel). The code is valid for `LOGIN_CODE_TTL_MINUTES` (10).
+- `python -m scripts.admin_recovery reset-password --email <admin email>`: asks twice for a new password (at least 12 characters, admin policy), stores its hash, sets `must_change_password`, and revokes every earlier token. The admin then signs in (which still needs a code) and must change the password.
+
+On PowerShell set the variable with `$env:ALLOW_ADMIN_RECOVERY = "1"` and remove it with `Remove-Item Env:ALLOW_ADMIN_RECOVERY`.
 
 ## Inviting other admins
 
@@ -20,8 +29,8 @@ Only the super admin can invite admins. Nobody ever sees a password or a code in
 
 **Super admin:**
 
-1. Call `POST /api/v1/admin/invites` with the new admin's name, phone number and email address.
-2. The server emails an 8-character code (shown as `XXXX-XXXX`) to that address. The response only confirms it, with masked contact details and `email_sent`.
+1. Call `POST /api/v1/admin/invites` with the new admin's name and email address (invitations have no phone number).
+2. The server emails an 8-character code (shown as `XXXX-XXXX`) to that address. The response only confirms it, with the masked email and `email_sent`.
 3. Tell the person to expect the email (and to check the spam folder). The invite stays open for 7 days; each code works for 15 minutes.
 4. Follow progress with `GET /api/v1/admin/invites` (`pending`, `used`, `expired`, `revoked`, `locked`).
 
@@ -30,8 +39,8 @@ If `email_sent` is `false`, fix the email configuration and call `POST /api/v1/a
 **Invited person:**
 
 1. Open `<FRONTEND_BASE_URL>/accept-invite`.
-2. Enter your email address, the code and a password of your own (at least 12 characters, not your email, name or phone number, and not a common password).
-3. Log in with your email or phone number and that password. No password change is forced, because you chose it yourself.
+2. Enter your email address, the code and a password of your own (at least 12 characters, not your email or name, and not a common password).
+3. You are signed in straight away: the invite code proved that you control the email. No password change is forced, because you chose it yourself. Later sign ins use your email, the password and a code emailed to you.
 
 ### When a code expires, is lost, or the invite locks
 
@@ -54,11 +63,15 @@ Admins (including the super admin), farmers and buyers reset their own passwords
 
 1. Open `<FRONTEND_BASE_URL>/reset-password` and enter the account's email address. The answer is always the same, whether or not the address exists.
 2. Enter the 8-character code from the email (valid for 15 minutes) and a new password. Admins need at least 12 characters, farmers and buyers at least 8.
-3. Log in again. Every token issued before the change stops working at once, on all devices.
+3. Sign in again with the new password and the emailed sign in code. Every token issued before the change stops working at once, on all devices.
 
-At most 3 codes are sent per account per hour, at least 60 seconds apart, and a code locks after 5 wrong tries; request a new one in that case. Disabled accounts get no code. Farmers and buyers who registered without an email address cannot reset a forgotten password (a documented limitation); to lock someone out immediately, disable the account.
+At most 3 codes are sent per account per hour, at least 60 seconds apart, and a code locks after 5 wrong tries; request a new one in that case. Disabled accounts get no code. Every account has a verified email, so every user can reset a forgotten password. To lock someone out immediately, disable the account. If an administrator cannot receive email at all, see [Recovery when email is down](#recovery-when-email-is-down).
 
-Changing a password while logged in (`POST /api/v1/auth/change-password`) also revokes older tokens, including the one used for the request, so log in again afterwards.
+Changing a password while signed in (`POST /api/v1/auth/change-password`) also revokes older tokens, including the one used for the request, so sign in again afterwards.
+
+## Finding users
+
+`GET /api/v1/admin/users?q=` searches names and email addresses (at least 2 characters; `%` and `_` are matched literally). Accounts have no phone number, so a number cannot be searched. Each item shows `email_verified_at`, when the address was confirmed.
 
 ## Removing a listing
 

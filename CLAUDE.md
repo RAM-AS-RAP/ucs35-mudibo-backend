@@ -51,6 +51,7 @@ The normal suite never touches a real DB. Tests build the app with `create_app()
 ## Domain rules worth knowing
 
 These are from `docs/decisions.md` and `Tasks/*.md`. The task specs are detailed per-module requirements and are worth reading before you change a module.
+- Accounts are email only (identity v2): no phone number on any account or invitation; a phone number exists only on a payment (`PayRequest.phone_number` is required). Registration is confirmed by an emailed code (`registration_service`), and every password sign in for the roles in `LOGIN_OTP_ROLES` needs an emailed code bound to a challenge token (`auth_service`). Sign in endpoints return `AuthResult` (`app/core/auth_result.py`).
 - Buyers cannot see prices or forecasts. Farmers and admins can.
 - Only markets with price data (currently Nairobi and Kisumu) are offered, even though `market_locations` has four rows.
 - Forecasts with stale origins are hidden.

@@ -36,7 +36,7 @@ A `paid` order can never change status (database trigger). The order status `pay
 
 ## Pay flow (`POST /orders/{id}/pay`)
 
-The buyer's M-Pesa number comes with the pay request: the optional body `{"phone_number": "..."}`. Without it, the buyer's profile number is used for now (a temporary fallback that goes away when phone numbers are removed from accounts); with neither the answer is 422 `phone_required`. The entered number is never saved to the user.
+The buyer's M-Pesa number comes with the pay request: the required body `{"phone_number": "..."}`. Accounts have no phone number (identity v2), so there is no fallback: a missing body, a missing field or an empty value is 422 `phone_required`. The entered number is stored only on the payment and is not verified.
 
 Two payment columns hold numbers:
 
@@ -47,9 +47,9 @@ Both are immutable after insert (database trigger) and are only ever returned ma
 
 Phase 1, one short transaction with no HTTP call:
 
-1. Check the payment settings (else 503 `payments_unavailable`), then the `Idempotency-Key` (else 422). A body number that is not a valid Safaricom number gives 422 `invalid_phone`, also for a replay.
-2. Look up the stored key `"{buyer_id}:{order_id}:{Idempotency-Key}"`, without a lock. If found and the request carries a different number than that payment's `phone_number`, return 409 `idempotency_key_reused`. Otherwise return 202 with the current order (an exact replay; Daraja is not called).
-3. Resolve the number (body, else profile, else 422 `phone_required`).
+1. Check the payment settings (else 503 `payments_unavailable`), then the `Idempotency-Key` (else 422).
+2. Resolve the number from the body before any database work: missing or empty gives 422 `phone_required`, a number that is not a valid Safaricom number gives 422 `invalid_phone`, also for a replay.
+3. Look up the stored key `"{buyer_id}:{order_id}:{Idempotency-Key}"`, without a lock. If found and the number differs from that payment's `phone_number`, return 409 `idempotency_key_reused`. Otherwise return 202 with the current order (an exact replay; Daraja is not called).
 4. Take the per buyer advisory lock: `SELECT pg_advisory_xact_lock(hashtext(:key))` with key `'pay-buyer:' || buyer.id`. It is transaction scoped, so it works through the transaction pooler and the phase 1 commit or rollback releases it. It makes the per buyer limits exact across all of the buyer's orders.
 5. Lock the buyer's order `FOR UPDATE` (else 404).
 6. Require `pending_payment` (else 409 `order_not_payable`).
