@@ -20,7 +20,6 @@ declare
     v_latest_row_count bigint;
     v_expired_count integer;
     v_failed boolean;
-    v_phone text;
 begin
     select id into v_super_admin_id
     from public.users
@@ -29,52 +28,48 @@ begin
 
     if v_super_admin_id is null then
         v_super_admin_id := gen_random_uuid();
-        v_phone := '2547' || lpad((floor(random() * 100000000)::bigint)::text, 8, '0');
-        insert into public.users (id, name, phone_number, email, password_hash, role, is_super_admin)
+        insert into public.users (id, name, email, password_hash, role, is_super_admin, email_verified_at)
         values (
             v_super_admin_id,
             'Schema verification super admin',
-            v_phone,
             'verification-' || v_super_admin_id::text || '@example.invalid',
             'verification-only-placeholder-hash',
             'admin',
-            true
+            true,
+            now()
         );
     end if;
 
-    v_phone := '2547' || lpad((floor(random() * 100000000)::bigint)::text, 8, '0');
-    insert into public.users (id, name, phone_number, email, password_hash, role)
+    insert into public.users (id, name, email, password_hash, role, email_verified_at)
     values (
         v_farmer_id,
         'Schema verification farmer',
-        v_phone,
         'verification-' || v_farmer_id::text || '@example.invalid',
         'verification-only-placeholder-hash',
-        'farmer'
+        'farmer',
+        now()
     );
 
-    v_phone := '2547' || lpad((floor(random() * 100000000)::bigint)::text, 8, '0');
-    insert into public.users (id, name, phone_number, email, password_hash, role)
+    insert into public.users (id, name, email, password_hash, role, email_verified_at)
     values (
         v_buyer_id,
         'Schema verification buyer',
-        v_phone,
         'verification-' || v_buyer_id::text || '@example.invalid',
         'verification-only-placeholder-hash',
-        'buyer'
+        'buyer',
+        now()
     );
 
     v_failed := false;
     begin
-        v_phone := '2547' || lpad((floor(random() * 100000000)::bigint)::text, 8, '0');
-        insert into public.users (name, phone_number, email, password_hash, role, is_super_admin)
+        insert into public.users (name, email, password_hash, role, is_super_admin, email_verified_at)
         values (
             'Second verification super admin',
-            v_phone,
             'verification-second-' || gen_random_uuid()::text || '@example.invalid',
             'verification-only-placeholder-hash',
             'admin',
-            true
+            true,
+            now()
         );
     exception when unique_violation then
         v_failed := true;
