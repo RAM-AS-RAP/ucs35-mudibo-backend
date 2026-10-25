@@ -5,12 +5,14 @@ index; ``test_invites_db.py`` checks them against a real database.
 """
 
 import logging
+from datetime import UTC, datetime
 from uuid import uuid4
 
+import jwt
 import pytest
+from auth_fakes import AuthStore
 from fastapi import BackgroundTasks
 from invite_fakes import NO_ROW, FakeMailer, RecordingDB, configure_codes, install, reset_attempt, rows
-from payment_fakes import FakeDB
 from response_helpers import without_request_id
 
 from app.core.codes import format_code, generate_code, hash_code
@@ -19,7 +21,6 @@ from app.core.errors import AppError, InvalidCredentials
 from app.core.security import hash_password, verify_password
 from app.integrations import email as email_integration
 from app.models.enums import UserRole
-from app.models.user import User
 from app.routers.auth import limiter
 from app.schemas.invite import PasswordResetConfirmRequest
 from app.services import auth_service, password_reset_service
@@ -122,14 +123,17 @@ def claimed(user_id):
     return rows({"user_id": user_id})
 
 
-async def test_a_valid_code_sets_the_new_password(api_client, application, caplog):
+@pytest.mark.parametrize("role", [UserRole.FARMER, UserRole.ADMIN])
+async def test_a_valid_code_sets_the_new_password(api_client, application, caplog, mailer, role):
     caplog.set_level(logging.DEBUG)
     code = generate_code()
     user_id = uuid4()
     db = install(
         application,
         None,
-        RecordingDB(results=[reset_attempt(code, user_id=user_id), claimed(user_id), rows({"id": user_id})]),
+        RecordingDB(
+            results=[reset_attempt(code, user_id=user_id, role=role.value), claimed(user_id), rows({"id": user_id})]
+        ),
     )
 
     response = await api_client.post("/api/v1/auth/password-reset/confirm", json=confirm_body(format_code(code)))
@@ -143,22 +147,28 @@ async def test_a_valid_code_sets_the_new_password(api_client, application, caplo
     assert db.commits == 2
     assert code not in caplog.text and NEW_PASSWORD not in caplog.text
 
-    user = User(
-        id=user_id,
-        name="Amina Farmer",
-        phone_number="254712345678",
-        email="amina@example.com",
-        password_hash=new_hash,
-        role=UserRole.FARMER,
-        is_super_admin=False,
-        must_change_password=False,
-        is_disabled=False,
-    )
+    # The next sign in uses the new password and still needs an emailed sign in code.
+    store = AuthStore()
+    user = store.add_user(role, id=user_id, email="amina@example.com", password_hash=new_hash)
     auth_service.get_login_throttle().reset()
-    login = await auth_service.login(FakeDB(scalars=[user]).session(), "amina@example.com", NEW_PASSWORD)
-    assert login["role"] == "farmer"
+    started = await auth_service.login(store.session(), "amina@example.com", NEW_PASSWORD)
+    assert started.status == "code_required" and started.access_token is None
+    assert [message.to for message in mailer.sent] == ["amina@example.com"]
     with pytest.raises(InvalidCredentials):
-        await auth_service.login(FakeDB(scalars=[user]).session(), "amina@example.com", OLD_PASSWORD)
+        await auth_service.login(store.session(), "amina@example.com", OLD_PASSWORD)
+
+    # A token issued before the reset is rejected once password_changed_at is set by the reset.
+    settings = get_settings()
+    issued = int(datetime.now(UTC).timestamp()) - 60
+    old_token = jwt.encode(
+        {"sub": str(user.id), "role": role.value, "iat": issued, "exp": issued + 3600},
+        settings.jwt_secret,
+        algorithm=settings.jwt_algorithm,
+    )
+    user.password_changed_at = datetime.now(UTC)
+    store.install(application)
+    me = await api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {old_token}"})
+    assert me.status_code == 401
 
 
 async def test_step_a_only_counts_attempts_on_a_usable_code_of_an_enabled_user():

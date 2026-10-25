@@ -98,7 +98,7 @@ def person(role=UserRole.ADMIN, *, super_admin=False, **overrides):
         "id": uuid4(),
         "name": "Super Admin" if super_admin else f"Test {role.value}",
         "email": "super@example.com" if super_admin else f"{role.value}@example.com",
-        "phone_number": "254711000001",
+        "email_verified_at": NOW,
         "role": role,
         "is_super_admin": super_admin,
         "is_disabled": False,
@@ -131,7 +131,6 @@ def inserted_invite(db: "RecordingDB") -> FakeResult:
                 "id": params["id"],
                 "name": params["name"],
                 "email": params["email"],
-                "phone_number": params["phone"],
                 "expires_at": NOW + timedelta(days=7),
                 "code_expires_at": NOW + timedelta(minutes=15),
             }
@@ -150,7 +149,6 @@ def updated_invite(invite_id, email="grace@example.com"):
                     "id": invite_id,
                     "name": "Grace Admin",
                     "email": email,
-                    "phone_number": "254712000001",
                     "expires_at": NOW + timedelta(days=7),
                     "code_expires_at": NOW + timedelta(minutes=15),
                 }
@@ -168,7 +166,6 @@ def invite_attempt(code: str, *, attempts=1, invite_id=None) -> FakeResult:
             {
                 "id": invite_id,
                 "name": "Grace Admin",
-                "phone_number": "254712000001",
                 "code_hash": hash_code("invite", invite_id, code),
                 "attempts": attempts,
             }
@@ -188,7 +185,6 @@ def reset_attempt(code: str, *, attempts=1, role="farmer", user_id=None, code_id
                 "attempts": attempts,
                 "role": role,
                 "name": "Amina Farmer",
-                "phone_number": "254712345678",
                 "email": "amina@example.com",
             }
         ]

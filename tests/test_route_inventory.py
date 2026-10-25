@@ -47,7 +47,6 @@ def fake_user(role: str) -> SimpleNamespace:
         id=uuid4(),
         name=f"Test {role}",
         email=f"{role}@example.com",
-        phone_number="254700000000",
         role=UserRole.ADMIN if role in ("admin", "super_admin") else UserRole(role),
         is_super_admin=role == "super_admin",
         must_change_password=False,

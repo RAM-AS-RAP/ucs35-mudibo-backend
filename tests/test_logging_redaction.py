@@ -8,11 +8,9 @@ callback) and an invite flow run through the API at DEBUG level.
 import json
 import logging
 import sys
-from datetime import UTC, datetime
-from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
+from auth_fakes import AuthStore
 from invite_fakes import FakeMailer, RecordingDB, configure_codes, inserted_invite, install, person
 from payment_fakes import (
     BUYER_PHONE,
@@ -34,7 +32,6 @@ from app.core.codes import format_code
 from app.core.config import get_settings
 from app.core.dependencies import get_current_user
 from app.core.logging_config import JsonFormatter, RedactionFilter, install_filters, redact_text
-from app.core.security import hash_password
 from app.db import get_db, get_session_factory
 from app.integrations import email as email_integration
 from app.integrations.daraja import get_daraja_client
@@ -42,6 +39,7 @@ from app.models.enums import UserRole
 from app.services import auth_service, payment_service
 
 LOGIN_PASSWORD = "Login-Unique-Passw0rd!"
+LOGIN_EMAIL = "login.farmer@example.com"
 LOGIN_PHONE = "254798765432"
 
 
@@ -120,53 +118,48 @@ def test_json_lines_have_the_documented_fields() -> None:
 # Flows -----------------------------------------------------------------------------------------
 
 
-class LoginSession:
-    def __init__(self, user):
-        self.user = user
-
-    async def scalar(self, statement):
-        del statement
-        return self.user
-
-    async def commit(self):
-        return None
-
-
-async def test_login_flow_logs_no_password_token_or_phone(api_client, application, captured) -> None:
-    user = SimpleNamespace(
-        id=uuid4(),
-        name="Farmer",
-        phone_number=LOGIN_PHONE,
-        email="farmer@example.com",
-        password_hash=hash_password(LOGIN_PASSWORD),
-        role=UserRole.FARMER,
-        is_super_admin=False,
-        is_disabled=False,
-        must_change_password=False,
-        created_at=datetime.now(UTC),
-        password_changed_at=None,
-    )
-    session = LoginSession(user)
-
-    async def request_session():
-        yield session
-
-    application.dependency_overrides[get_db] = request_session
+async def test_login_flow_logs_no_password_code_token_or_email(api_client, application, monkeypatch, captured) -> None:
+    configure_codes(monkeypatch, get_settings())
+    store = AuthStore().install(application)
+    mailer = FakeMailer(store)
+    monkeypatch.setattr(email_integration, "send_email", mailer.send_email)
+    user = store.add_user(UserRole.FARMER, email=LOGIN_EMAIL, password=LOGIN_PASSWORD)
     auth_service.get_login_throttle().reset()
-    login = await api_client.post("/api/v1/auth/login", json={"identifier": "0798765432", "password": LOGIN_PASSWORD})
-    assert login.status_code == 200, login.text
-    token = login.json()["access_token"]
+    started = await api_client.post("/api/v1/auth/login", json={"email": LOGIN_EMAIL, "password": LOGIN_PASSWORD})
+    assert started.status_code == 200, started.text
+    challenge = started.json()["challenge_token"]
+    code = mailer.code()
+    verified = await api_client.post("/api/v1/auth/login/verify", json={"challenge_token": challenge, "code": code})
+    assert verified.status_code == 200, verified.text
+    token = verified.json()["access_token"]
     me = await api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
-    wrong = await api_client.post("/api/v1/auth/login", json={"identifier": LOGIN_PHONE, "password": "Wrong-Pass-1!"})
+    wrong = await api_client.post("/api/v1/auth/login", json={"email": user.email, "password": "Wrong-Pass-1!"})
     assert wrong.status_code == 401
-    logging.getLogger("app.test").info("login check for %s with %s", LOGIN_PHONE, f"Bearer {token}")
+    logging.getLogger("app.test").info(
+        "login check for %s with %s, %s and code=%s", user.email, f"Bearer {token}", LOGIN_PHONE, format_code(code)
+    )
 
     text = all_log_text(captured)
     assert "GET /api/v1/auth/me 200" in text  # the access log line is there
-    for secret in (LOGIN_PASSWORD, "Wrong-Pass-1!", token, LOGIN_PHONE, "0798765432"):
+    for secret in (
+        LOGIN_PASSWORD,
+        "Wrong-Pass-1!",
+        token,
+        challenge,
+        code,
+        format_code(code),
+        LOGIN_EMAIL,
+        LOGIN_PHONE,
+    ):
         assert secret not in text
-    assert "254*******432" in text
+    assert "l***@e***.com" in text and "254*******432" in text
+
+
+def test_redaction_masks_email_addresses() -> None:
+    redacted = redact_text("sent to grace.wanjiru+demo@example.co.ke and amina@example.com")
+    assert "grace.wanjiru" not in redacted and "amina@example.com" not in redacted
+    assert "g***@e***.ke" in redacted and "a***@e***.com" in redacted
 
 
 async def test_payment_flow_logs_no_daraja_secret_token_or_phone(
@@ -195,7 +188,11 @@ async def test_payment_flow_logs_no_daraja_secret_token_or_phone(
     application.dependency_overrides[get_db] = request_session
     application.dependency_overrides[get_session_factory] = lambda: db.factory
     application.dependency_overrides[get_daraja_client] = lambda: FakeDaraja(db)
-    paid = await api_client.post(f"/api/v1/orders/{order.id}/pay", headers={"Idempotency-Key": "log-check-0001"})
+    paid = await api_client.post(
+        f"/api/v1/orders/{order.id}/pay",
+        headers={"Idempotency-Key": "log-check-0001"},
+        json={"phone_number": BUYER_PHONE},
+    )
     assert paid.status_code == 202, paid.text
 
     callback_db = FakeDB(scalars=[None])
@@ -224,12 +221,12 @@ async def test_invite_flow_logs_no_code(api_client, application, monkeypatch, ca
     monkeypatch.setattr(email_integration, "send_email", mailer.send_email)
     response = await api_client.post(
         "/api/v1/admin/invites",
-        json={"name": "Grace Admin", "phone_number": "0712000001", "email": "grace@example.com"},
+        json={"name": "Grace Admin", "email": "grace@example.com"},
     )
     assert response.status_code == 201, response.text
     code = mailer.code()
-    logging.getLogger("app.test").info("invite code=%s for %s", format_code(code), "254712000001")
+    logging.getLogger("app.test").info("invite code=%s for %s", format_code(code), "grace@example.com")
 
     text = all_log_text(captured)
-    for secret in (code, format_code(code), "254712000001", "0712000001"):
+    for secret in (code, format_code(code), "grace@example.com"):
         assert secret not in text

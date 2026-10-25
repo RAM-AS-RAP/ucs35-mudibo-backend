@@ -118,7 +118,7 @@ async def test_validation_errors_carry_the_request_id_and_never_echo_a_password(
     async with client_for(application) as client:
         response = await client.post(
             "/api/v1/auth/register/farmer",
-            json={"name": "A", "phone_number": "bad", "password": secret, "role": "admin"},
+            json={"name": "A", "email": "bad", "password": secret, "role": "admin"},
         )
     assert response.status_code == 422
     error = response.json()["error"]
@@ -156,7 +156,7 @@ async def test_unhandled_exception_returns_the_generic_500_and_logs_the_tracebac
 async def test_an_oversized_json_body_is_413() -> None:
     application = create_app(make_settings(max_json_body_bytes=1024))
     async with client_for(application) as client:
-        response = await client.post("/api/v1/auth/login", json={"identifier": "x" * 2000, "password": "y"})
+        response = await client.post("/api/v1/auth/login", json={"email": "x" * 2000, "password": "y"})
     assert response.status_code == 413
     error = response.json()["error"]
     assert error["code"] == "payload_too_large" and error["request_id"]
@@ -184,9 +184,7 @@ async def test_multipart_listing_routes_get_the_image_limit() -> None:
         too_big = await client.post(
             "/api/v1/listings", files={"image": ("a.png", b"x" * (4096 + 65536 + 1), "image/png")}
         )
-        within = await client.patch(
-            f"/api/v1/listings/{uuid4()}", files={"image": ("a.png", b"x" * 8192, "image/png")}
-        )
+        within = await client.patch(f"/api/v1/listings/{uuid4()}", files={"image": ("a.png", b"x" * 8192, "image/png")})
     assert too_big.status_code == 413
     assert too_big.json()["error"]["code"] == "payload_too_large"
     # Above the JSON limit but within the multipart limit: the request reaches authentication.
@@ -328,7 +326,7 @@ async def _fake_db():
 
 
 async def _login_six_times(application: FastAPI, monkeypatch) -> list:
-    async def invalid_login(session, identifier, password):
+    async def invalid_login(session, email, password):
         raise InvalidCredentials()
 
     monkeypatch.setattr(auth_service, "login", invalid_login)
@@ -336,7 +334,7 @@ async def _login_six_times(application: FastAPI, monkeypatch) -> list:
     auth_router.limiter._storage.reset()
     async with client_for(application) as client:
         return [
-            await client.post("/api/v1/auth/login", json={"identifier": "buyer@example.com", "password": "wrong"})
+            await client.post("/api/v1/auth/login", json={"email": "buyer@example.com", "password": "wrong"})
             for _ in range(6)
         ]
 

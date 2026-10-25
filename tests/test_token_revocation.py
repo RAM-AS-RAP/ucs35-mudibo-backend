@@ -35,8 +35,8 @@ def make_user(**overrides):
     values = {
         "id": uuid4(),
         "name": "Amina Farmer",
-        "phone_number": "254712345678",
         "email": "amina@example.com",
+        "email_verified_at": datetime.now(UTC),
         "role": UserRole.FARMER,
         "is_disabled": False,
         "is_super_admin": False,
@@ -119,7 +119,7 @@ async def test_change_password_revokes_the_token_used_for_it(api_client, applica
     assert (await api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {fresh}"})).status_code == 200
 
 
-PERSONAL = "The password must not be your email, name or phone number."
+PERSONAL = "The password must not be your email or name."
 
 
 @pytest.mark.parametrize(

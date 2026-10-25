@@ -22,23 +22,23 @@ from invite_fakes import (
     rows,
     updated_invite,
 )
-from payment_fakes import NOW, FakeDB, FakeResult
+from payment_fakes import NOW, FakeResult
 from response_helpers import without_request_id
 from sqlalchemy.exc import IntegrityError
 
+from app.core.auth_result import signed_in_result
 from app.core.codes import format_code, generate_code, hash_code, verify_code
 from app.core.config import get_settings
 from app.core.errors import AppError
-from app.core.security import verify_password
+from app.core.security import decode_access_token, verify_password
 from app.integrations import email as email_integration
 from app.models.enums import UserRole
-from app.models.user import User
 from app.routers.auth import limiter
 from app.schemas.common import Pagination
 from app.schemas.invite import AcceptInviteRequest, InvitePage, InviteSentOut
-from app.services import auth_service, invite_service
+from app.services import invite_service
 
-INVITE_BODY = {"name": " Grace Admin ", "phone_number": "0712000001", "email": "Grace@Example.com"}
+INVITE_BODY = {"name": " Grace Admin ", "email": "Grace@Example.com"}
 GENERIC_FAILURE = {"error": {"code": "invalid_or_expired_code", "message": "The code is invalid or has expired."}}
 STRONG_PASSWORD = "Mavuno-Ledger-2026!"
 
@@ -66,7 +66,7 @@ def create_db(*, user_exists=False, pending=0):
 # Role matrix ---------------------------------------------------------------------------------
 
 SUPER_ADMIN_ROUTES = [
-    ("post", "/api/v1/admin/invites", {"name": "Grace Admin", "phone_number": "0712000001", "email": "g@example.com"}),
+    ("post", "/api/v1/admin/invites", {"name": "Grace Admin", "email": "g@example.com"}),
     ("post", f"/api/v1/admin/invites/{uuid4()}/resend", None),
     ("get", "/api/v1/admin/invites", None),
     ("delete", f"/api/v1/admin/invites/{uuid4()}", None),
@@ -102,7 +102,6 @@ async def test_super_admin_routes_succeed_for_the_super_admin(api_client, applic
         id=uuid4(),
         name="Grace Admin",
         email_masked="g***@e***.com",
-        phone_masked="254*******001",
         expires_at=NOW,
         code_expires_at=NOW,
         email_sent=True,
@@ -129,16 +128,8 @@ async def test_super_admin_routes_succeed_for_the_super_admin(api_client, applic
 
 async def test_public_routes_work_without_a_token(api_client, application, monkeypatch):
     async def accepted(*args, **kwargs):
-        return {
-            "id": uuid4(),
-            "name": "Grace Admin",
-            "phone_number": "254712000001",
-            "email": "grace@example.com",
-            "role": "admin",
-            "is_super_admin": False,
-            "must_change_password": False,
-            "created_at": NOW,
-        }
+        row = {"id": uuid4(), "role": "admin", "is_super_admin": False, "must_change_password": False}
+        return signed_in_result(row)
 
     async def nothing(*args, **kwargs):
         return None
@@ -168,9 +159,9 @@ async def test_public_routes_work_without_a_token(api_client, application, monke
         {**INVITE_BODY, "role": "admin"},
         {**INVITE_BODY, "is_super_admin": True},
         {**INVITE_BODY, "must_change_password": False},
-        {"name": "Grace Admin", "phone_number": "0712000001"},
+        {"name": "Grace Admin"},
         {**INVITE_BODY, "name": "G"},
-        {**INVITE_BODY, "phone_number": "12345"},
+        {**INVITE_BODY, "phone_number": "0712000001"},
         {**INVITE_BODY, "email": "not-an-email"},
     ],
 )
@@ -202,17 +193,12 @@ async def test_invite_creation_emails_the_code_after_commit_and_never_returns_it
         "id",
         "name",
         "email_masked",
-        "phone_masked",
         "expires_at",
         "code_expires_at",
         "email_sent",
         "message",
     }
-    assert (body["name"], body["email_masked"], body["phone_masked"]) == (
-        "Grace Admin",
-        "g***@e***.com",
-        "254*******001",
-    )
+    assert (body["name"], body["email_masked"]) == ("Grace Admin", "g***@e***.com")
     assert body["email_sent"] is True
     code = mailer.code()
     for secret in (code, format_code(code)):
@@ -221,7 +207,8 @@ async def test_invite_creation_emails_the_code_after_commit_and_never_returns_it
     stored = db.params_for("insert into public.admin_invites")
     assert stored["code_hash"] == hash_code("invite", stored["id"], code)
     assert code not in str(stored)
-    assert (stored["email"], stored["phone"], stored["name"]) == ("grace@example.com", "254712000001", "Grace Admin")
+    assert (stored["email"], stored["name"]) == ("grace@example.com", "Grace Admin")
+    assert "phone" not in stored
     assert stored["created_by"] == actor.id
     assert stored["code_hash"] not in response.text and stored["code_hash"] not in caplog.text
     # The email goes out after the commit, with no transaction open.
@@ -258,14 +245,17 @@ async def test_an_existing_user_gives_409_and_creates_nothing(mailer):
     assert mailer.sent == []
 
 
-async def test_a_new_invite_revokes_the_pending_one_for_the_same_email_or_phone(mailer):
+async def test_a_new_invite_revokes_the_pending_one_for_the_same_email(mailer):
     db = create_db()
     await invite_service.create_invite(db.session(), super_admin(), _create_request())
     revoke = db.index_of("set revoked_at = now()")
     assert revoke < db.index_of("insert into public.admin_invites")
-    assert "email = %(email)s or phone_number = %(phone)s" in db.statements[revoke]
-    assert db.params[revoke] == {"email": "grace@example.com", "phone": "254712000001"}
+    assert "where email = %(email)s and used_at is null" in db.statements[revoke]
+    assert "phone" not in db.statements[revoke]
+    assert db.params[revoke] == {"email": "grace@example.com"}
     assert db.index_of("pg_advisory_xact_lock") == 0
+    exists_sql = db.statements[db.index_of("select exists(select 1 from public.users")]
+    assert "lower(email) = %(email)s" in exists_sql and "phone" not in exists_sql
 
 
 async def test_the_pending_cap_is_enforced(mailer):
@@ -467,7 +457,6 @@ def claimed_invite(created_by):
     return rows(
         {
             "name": "Grace Admin",
-            "phone_number": "254712000001",
             "email": "grace@example.com",
             "created_by": created_by,
         }
@@ -480,7 +469,6 @@ def inserted_user(db):
         {
             "id": uuid4(),
             "name": params["name"],
-            "phone_number": params["phone"],
             "email": params["email"],
             "role": "admin",
             "is_super_admin": False,
@@ -494,7 +482,7 @@ def accept_body(code, password=STRONG_PASSWORD, email="grace@example.com"):
     return {"email": email, "code": code, "password": password}
 
 
-async def test_a_correct_code_creates_an_admin_who_can_log_in(api_client, application, caplog):
+async def test_a_correct_code_creates_an_admin_who_is_signed_in(api_client, application, caplog):
     caplog.set_level(logging.DEBUG)
     code = generate_code()
     inviter = uuid4()
@@ -503,32 +491,24 @@ async def test_a_correct_code_creates_an_admin_who_can_log_in(api_client, applic
     response = await api_client.post("/api/v1/auth/accept-invite", json=accept_body(format_code(code).lower()))
 
     assert response.status_code == 201, response.text
+    assert response.headers["cache-control"] == "no-store"
     body = response.json()
+    # The invite code proved control of the email, so a token follows directly (no sign in code).
+    assert body["status"] == "signed_in"
     assert (body["role"], body["is_super_admin"], body["must_change_password"]) == ("admin", False, False)
+    assert "challenge_token" not in body
+    claims = decode_access_token(body["access_token"])
+    assert claims["role"] == "admin" and set(claims) == {"sub", "role", "iat", "exp"}
     assert STRONG_PASSWORD not in response.text and "password_hash" not in response.text
     insert_sql = db.statements[db.index_of("insert into public.users")]
     assert "'admin', false, false" in insert_sql and "password_changed_at" in insert_sql
+    assert "email_verified_at" in insert_sql and "now(), now()" in insert_sql
+    assert "phone" not in insert_sql
     stored = db.params_for("insert into public.users")
     assert stored["created_by"] == inviter
     assert verify_password(stored["password_hash"], STRONG_PASSWORD)
     assert db.commits == 2  # step A, then step B
     assert code not in caplog.text and STRONG_PASSWORD not in caplog.text
-
-    admin = User(
-        id=uuid4(),
-        name="Grace Admin",
-        phone_number="254712000001",
-        email="grace@example.com",
-        password_hash=stored["password_hash"],
-        role=UserRole.ADMIN,
-        is_super_admin=False,
-        must_change_password=False,
-        is_disabled=False,
-    )
-    auth_service.get_login_throttle().reset()
-    login = await auth_service.login(FakeDB(scalars=[admin]).session(), "grace@example.com", STRONG_PASSWORD)
-    assert login["role"] == "admin" and login["must_change_password"] is False
-    assert login["is_super_admin"] is False
 
 
 def step_a_sql(db):
@@ -609,8 +589,8 @@ async def test_the_tenth_wrong_attempt_locks_the_invite():
 async def test_a_correct_code_on_the_last_attempt_still_works():
     code = generate_code()
     db = RecordingDB(results=[invite_attempt(code, attempts=10), claimed_invite(uuid4()), inserted_user])
-    user = await invite_service.accept_invite(db.session(), AcceptInviteRequest(**accept_body(code)))
-    assert user["role"] == "admin"
+    result = await invite_service.accept_invite(db.session(), AcceptInviteRequest(**accept_body(code)))
+    assert result.status == "signed_in" and result.role == "admin"
     assert not db.has("set locked_at")
 
 
@@ -628,7 +608,7 @@ async def test_a_unique_violation_rolls_back_the_claim():
     ("password", "reason"),
     [
         ("Short-pass1", "Use at least 12 characters."),
-        ("grace@example.com", "The password must not be your email, name or phone number."),
+        ("grace@example.com", "The password must not be your email or name."),
         ("password1234", "This password is too common."),
     ],
 )
@@ -644,15 +624,24 @@ async def test_accept_checks_the_admin_password_policy_before_the_code(api_clien
     assert db.statements == []
 
 
-async def test_accept_rejects_the_invited_name_or_phone_as_password_after_the_code():
+async def test_accept_rejects_the_invited_name_as_password_after_the_code():
     code = generate_code()
     db = RecordingDB(results=[invite_attempt(code)])
+    # 12 characters, so it passes the checks made before the code; it equals the invited name.
     with pytest.raises(AppError) as exc_info:
         await invite_service.accept_invite(
-            db.session(), AcceptInviteRequest(**accept_body(code, password="254712000001"))
+            db.session(), AcceptInviteRequest(**accept_body(code, password="Grace Admin "))
         )
     assert exc_info.value.code == "password_too_weak"
+    assert exc_info.value.reason == "The password must not be your email or name."
     assert not db.has("set used_at")
+
+
+async def test_accept_step_a_never_reads_a_phone_number():
+    db = RecordingDB(results=[NO_ROW])
+    with pytest.raises(AppError):
+        await invite_service.accept_invite(db.session(), AcceptInviteRequest(**accept_body("ABCD-EFGH")))
+    assert "phone" not in step_a_sql(db)
 
 
 @pytest.mark.parametrize(

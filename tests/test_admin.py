@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from payment_fakes import NOW, FakeDB, FakeResult, make_order, make_payment
+from payment_fakes import NOW, FakeDB, FakeResult, bound_values, make_order, make_payment
 from pydantic import BaseModel, ValidationError
 
 from app.core.dependencies import get_current_user
@@ -31,7 +31,7 @@ from app.services import (
     listing_service,
     order_service,
 )
-from app.utils.search import contains_pattern, phone_prefix
+from app.utils.search import contains_pattern
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
@@ -51,8 +51,8 @@ def make_user(role=UserRole.FARMER, **overrides) -> User:
     values = {
         "id": uuid4(),
         "name": f"Test {role.value}",
-        "phone_number": "254712345678",
         "email": f"{role.value}@example.com",
+        "email_verified_at": NOW,
         "password_hash": hash_password("Original-passw0rd!"),
         "role": role,
         "is_super_admin": False,
@@ -299,14 +299,32 @@ async def test_users_list_uses_one_count_and_one_page_statement():
     page_sql = db.statements[1]
     assert "ILIKE" in page_sql and "ESCAPE" in page_sql
     assert "count(*)" in page_sql.lower() and "GROUP BY" in page_sql
-    assert "password_hash" not in json.dumps([item.model_dump(mode="json") for item in page.items])
+    dumped = json.dumps([item.model_dump(mode="json") for item in page.items])
+    assert "password_hash" not in dumped and "phone" not in dumped
+    assert all(item.email_verified_at == NOW for item in page.items)
+
+
+async def test_users_search_matches_name_and_email_only():
+    db = FakeDB(scalars=[0], results=[FakeResult(rows=[])])
+    await admin_user_service.list_users(db.session(), Pagination(), q="0712 34")
+    page_sql = db.statements[1]
+    assert "lower(users.name) LIKE lower(" in page_sql or "users.name ILIKE" in page_sql
+    assert "users.email ILIKE" in page_sql
+    assert "phone" not in page_sql and "phone" not in db.statements[0]
+    values = bound_values(db.raw_statements[1])
+    assert "%0712 34%" in values
 
 
 def test_search_wildcards_are_matched_literally():
     assert contains_pattern("50%_off") == r"%50\%\_off%"
     assert contains_pattern("a\\b") == r"%a\\b%"
-    assert phone_prefix("0712 34") == "25471234"
-    assert phone_prefix("John") is None
+
+
+def test_admin_user_schema_has_no_phone_and_has_email_verified_at():
+    from app.schemas.admin import UserAdminOut
+
+    assert "phone_number" not in UserAdminOut.model_fields
+    assert "email_verified_at" in UserAdminOut.model_fields
 
 
 @pytest.mark.parametrize("q", ["a", "x" * 51])

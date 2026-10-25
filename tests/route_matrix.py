@@ -37,7 +37,11 @@ API_ROUTES: dict[tuple[str, str], Access] = {
     # Authentication
     ("POST", "/api/v1/auth/register/farmer"): "public",  # self registration; role fixed by the route
     ("POST", "/api/v1/auth/register/buyer"): "public",  # self registration; role fixed by the route
+    ("POST", "/api/v1/auth/register/verify"): "public",  # no account exists yet; token plus emailed code
+    ("POST", "/api/v1/auth/register/resend"): "public",  # no account exists yet; always the same 202
     ("POST", "/api/v1/auth/login"): "public",  # obtaining a token cannot require a token
+    ("POST", "/api/v1/auth/login/verify"): "public",  # second sign in step; challenge token plus emailed code
+    ("POST", "/api/v1/auth/login/resend"): "public",  # second sign in step; needs a valid challenge token
     ("POST", "/api/v1/auth/change-password"): ANY_ROLE,
     ("GET", "/api/v1/auth/me"): ANY_ROLE,
     ("POST", "/api/v1/auth/accept-invite"): "public",  # invitee has no account yet; the emailed code is the check

@@ -185,3 +185,68 @@ def test_admin_settings_have_documented_defaults(valid_settings) -> None:
 def test_admin_settings_are_validated(valid_settings, field, value) -> None:
     with pytest.raises(ValidationError):
         Settings(**{**valid_settings, field: value})
+
+
+# Identity v2 ---------------------------------------------------------------------------------
+
+
+def test_identity_settings_have_documented_defaults(valid_settings) -> None:
+    settings = Settings(**valid_settings)
+    assert settings.access_token_expire_minutes == 480
+    assert settings.login_otp_role_set == {"farmer", "buyer", "admin"}
+    assert (
+        settings.reg_ttl_minutes,
+        settings.reg_code_ttl_minutes,
+        settings.reg_max_attempts,
+        settings.reg_max_sends,
+        settings.reg_resend_cooldown_seconds,
+        settings.reg_exists_notice_minutes,
+    ) == (60, 15, 5, 5, 60, 10)
+    assert (
+        settings.login_code_ttl_minutes,
+        settings.login_challenge_ttl_minutes,
+        settings.login_max_attempts,
+        settings.login_max_sends,
+        settings.login_resend_cooldown_seconds,
+        settings.login_challenges_per_hour,
+    ) == (10, 10, 5, 3, 60, 10)
+    assert not hasattr(settings, "seed_admin_phone")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("login_otp_roles", "farmer,owner"),
+        ("reg_ttl_minutes", 9),
+        ("reg_ttl_minutes", 1441),
+        ("reg_code_ttl_minutes", 4),
+        ("reg_max_attempts", 0),
+        ("reg_max_sends", 6),
+        ("reg_resend_cooldown_seconds", 9),
+        ("reg_exists_notice_minutes", 0),
+        ("login_code_ttl_minutes", 61),
+        ("login_challenge_ttl_minutes", 4),
+        ("login_max_attempts", 21),
+        ("login_max_sends", 0),
+        ("login_resend_cooldown_seconds", 3601),
+        ("login_challenges_per_hour", 0),
+        ("login_challenges_per_hour", 101),
+        ("access_token_expire_minutes", 1441),
+    ],
+)
+def test_identity_settings_are_validated(valid_settings, field, value) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**{**valid_settings, field: value})
+
+
+def test_a_code_cannot_outlive_its_registration_or_challenge(valid_settings) -> None:
+    with pytest.raises(ValidationError):
+        Settings(**valid_settings, reg_ttl_minutes=10, reg_code_ttl_minutes=15)
+    with pytest.raises(ValidationError):
+        Settings(**valid_settings, login_challenge_ttl_minutes=5, login_code_ttl_minutes=10)
+
+
+def test_login_otp_roles_is_normalised(valid_settings) -> None:
+    settings = Settings(**valid_settings, login_otp_roles=" Admin , farmer,admin ")
+    assert settings.login_otp_roles == "admin,farmer"
+    assert settings.login_otp_role_set == {"admin", "farmer"}

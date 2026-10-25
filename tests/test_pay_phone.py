@@ -4,6 +4,7 @@ No database or network: the request and payment sessions are scripted fakes and 
 served by an ``httpx.MockTransport``.
 """
 
+import inspect
 import json
 import logging
 import re
@@ -39,10 +40,12 @@ from app.services import payment_service
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 PAY_KEY = "pay-key-0001"
 PAY_HEADERS = {"Idempotency-Key": PAY_KEY}
-PROFILE_PHONE = "254799000111"
 ENTERED = "254712345678"
 INVALID_PHONE = {
     "error": {"code": "invalid_phone", "message": "Enter a valid Safaricom number, for example 0712 345 678."}
+}
+PHONE_REQUIRED = {
+    "error": {"code": "phone_required", "message": "Enter the M-Pesa number to send the payment prompt to."}
 }
 
 
@@ -93,32 +96,45 @@ def statements_with(db: FakeDB, fragment: str) -> list[int]:
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "expected"),
+    "kwargs",
     [
-        ({}, PROFILE_PHONE),
-        ({"json": {}}, PROFILE_PHONE),
-        ({"json": {"phone_number": None}}, PROFILE_PHONE),
-        ({"json": {"phone_number": "0712 345 678"}}, ENTERED),
-        (
-            {
-                "content": b'{"phone_number": "+254712345678"}',
-                "headers": {**PAY_HEADERS, "Content-Type": "application/json"},
-            },
-            ENTERED,
-        ),
+        {"json": {"phone_number": "0712 345 678"}},
+        {
+            "content": b'{"phone_number": "+254712345678"}',
+            "headers": {**PAY_HEADERS, "Content-Type": "application/json"},
+        },
     ],
 )
-async def test_no_body_an_empty_object_and_a_number_all_reach_the_flow(
-    api_client, application, settings, kwargs, expected
-):
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
+async def test_an_entered_number_reaches_the_flow(api_client, application, settings, kwargs):
+    buyer = make_buyer()
     db, order = pay_db(buyer)
     daraja = FakeDaraja(db)
     install(application, db, buyer, daraja)
     response = await post_pay(api_client, order.id, **kwargs)
     assert response.status_code == 202, response.text
-    assert db.payments[0].phone_number == expected
-    assert daraja.pushes[0]["phone"] == expected
+    assert db.payments[0].phone_number == ENTERED
+    assert daraja.pushes[0]["phone"] == ENTERED
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {"json": {}},
+        {"json": {"phone_number": None}},
+        {"json": {"phone_number": ""}},
+        {"json": {"phone_number": "   "}},
+    ],
+)
+async def test_a_missing_body_field_or_value_is_422_phone_required(api_client, application, settings, kwargs):
+    db = FakeDB()
+    daraja = FakeDaraja(db)
+    install(application, db, make_buyer(), daraja)
+    response = await post_pay(api_client, uuid4(), **kwargs)
+    assert response.status_code == 422
+    assert without_request_id(response.json()) == PHONE_REQUIRED
+    # Refused before any database work or Daraja call.
+    assert db.statements == [] and daraja.pushes == []
 
 
 @pytest.mark.parametrize(
@@ -127,8 +143,6 @@ async def test_no_body_an_empty_object_and_a_number_all_reach_the_flow(
         {"phone_number": "0712345678", "amount": 1},
         {"phone": "0712345678"},
         {"phone_number": "0" * 21},
-        {"phone_number": "07"},
-        {"phone_number": "   "},
         {"phone_number": 712345678},
         ["0712345678"],
         "0712345678",
@@ -170,10 +184,10 @@ async def test_a_body_that_is_not_json_is_422(api_client, application, settings)
     ],
 )
 def test_accepted_formats_normalise(raw, normalized):
-    assert payment_service.resolve_payment_phone(make_buyer(), raw) == normalized
+    assert payment_service.resolve_payment_phone(raw) == normalized
 
 
-@pytest.mark.parametrize("raw", ["071234567", "07123456789", "07123456ab", "255712345678", "254612345678", "abc"])
+@pytest.mark.parametrize("raw", ["07", "071234567", "07123456789", "07123456ab", "255712345678", "254612345678", "abc"])
 async def test_invalid_numbers_are_422_invalid_phone(api_client, application, settings, raw):
     db = FakeDB()
     daraja = FakeDaraja(db)
@@ -182,55 +196,46 @@ async def test_invalid_numbers_are_422_invalid_phone(api_client, application, se
     assert response.status_code == 422
     assert without_request_id(response.json()) == INVALID_PHONE
     assert db.statements == [] and daraja.pushes == []
-    assert raw not in response.text
+    # The submitted value is never echoed (the fixed example number in the message is ignored).
+    assert raw not in response.text.replace(INVALID_PHONE["error"]["message"], "")
 
 
 # Resolution ----------------------------------------------------------------------------------
 
 
-def test_a_body_number_wins_over_the_profile_number():
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
-    assert payment_service.resolve_payment_phone(buyer, "0712345678") == ENTERED
-
-
-def test_without_a_body_the_profile_number_is_used_and_revalidated():
-    assert payment_service.resolve_payment_phone(make_buyer(phone_number=PROFILE_PHONE), None) == PROFILE_PHONE
+def test_the_entered_number_is_the_only_source():
+    assert payment_service.resolve_payment_phone("0712345678") == ENTERED
     with pytest.raises(payment_service.AppError) as exc_info:
-        payment_service.resolve_payment_phone(make_buyer(phone_number="255700000000"), None)
+        payment_service.resolve_payment_phone("255700000000")
     assert exc_info.value.code == "invalid_phone"
 
 
-@pytest.mark.parametrize("profile", ["missing", None, ""])
-def test_with_neither_number_the_result_is_phone_required(profile):
-    buyer = make_buyer()
-    if profile == "missing":
-        del buyer.phone_number  # an account after phone numbers are removed from users
-    else:
-        buyer.phone_number = profile
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_without_a_number_the_result_is_phone_required(value):
     with pytest.raises(payment_service.AppError) as exc_info:
-        payment_service.resolve_payment_phone(buyer, None)
+        payment_service.resolve_payment_phone(value)
     assert (exc_info.value.status_code, exc_info.value.code) == (422, "phone_required")
     assert str(exc_info.value) == "Enter the M-Pesa number to send the payment prompt to."
 
 
-async def test_a_buyer_without_a_number_gets_phone_required_before_any_lock(api_client, application, settings):
-    buyer = make_buyer()
-    del buyer.phone_number
-    db = FakeDB(scalars=[None])
-    daraja = FakeDaraja(db)
-    install(application, db, buyer, daraja)
-    response = await post_pay(api_client, uuid4())
-    assert response.status_code == 422
-    assert without_request_id(response.json()) == {
-        "error": {"code": "phone_required", "message": "Enter the M-Pesa number to send the payment prompt to."}
-    }
-    assert len(db.statements) == 1 and "FOR UPDATE" not in db.statements[0]
-    assert daraja.pushes == []
+def test_no_profile_fallback_remains():
+    source = inspect.getsource(payment_service)
+    resolver = inspect.getsource(payment_service.resolve_payment_phone)
+    assert "buyer." not in resolver and "getattr(" not in resolver and "profile" not in resolver.lower()
+    assert 'getattr(buyer, "phone_number"' not in source and "buyer.phone_number" not in source
+    assert list(inspect.signature(payment_service.resolve_payment_phone).parameters) == ["body_phone"]
 
 
-async def test_a_buyer_without_a_profile_number_can_pay_with_an_entered_number(api_client, application, settings):
+def test_the_pay_request_requires_the_number_in_the_published_schema(application):
+    schema = application.openapi()
+    pay_request = schema["components"]["schemas"]["PayRequest"]
+    assert pay_request["required"] == ["phone_number"]
+    assert schema["paths"]["/api/v1/orders/{order_id}/pay"]["post"]["requestBody"]["required"] is True
+
+
+async def test_a_buyer_can_pay_with_an_entered_number(api_client, application, settings):
     buyer = make_buyer()
-    del buyer.phone_number
+    assert not hasattr(buyer, "phone_number")  # accounts have no phone number
     db, order = pay_db(buyer)
     install(application, db, buyer, FakeDaraja(db))
     response = await post_pay(api_client, order.id, json={"phone_number": "0712345678"})
@@ -245,7 +250,7 @@ async def test_the_entered_number_is_stored_and_the_target_follows_the_setting(
     api_client, application, monkeypatch, target, expected_stk
 ):
     use_settings(monkeypatch, payment_settings(mpesa_stk_target=target))
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
+    buyer = make_buyer()
     db, order = pay_db(buyer)
     daraja = FakeDaraja(db)
     install(application, db, buyer, daraja)
@@ -257,7 +262,7 @@ async def test_the_entered_number_is_stored_and_the_target_follows_the_setting(
     assert [push["phone"] for push in daraja.pushes] == [expected_stk]
     assert response.json()["prompt"] == f"Prompt sent to 254*******{expected_stk[-3:]}"
     # The entered number is never written to the user.
-    assert buyer.phone_number == PROFILE_PHONE
+    assert not hasattr(buyer, "phone_number")
 
 
 @pytest.mark.parametrize(
@@ -285,7 +290,7 @@ async def test_daraja_receives_the_expected_party_a_and_phone_number(
         )
 
     client = DarajaClient(settings, transport=httpx.MockTransport(daraja_handler))
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
+    buyer = make_buyer()
     db, order = pay_db(buyer)
     install(application, db, buyer, client)
     try:
@@ -311,13 +316,10 @@ def existing_payment(buyer, order, **overrides):
 
 
 @pytest.mark.parametrize(
-    "kwargs",
-    [{}, {"json": {}}, {"json": {"phone_number": "0712345678"}}, {"json": {"phone_number": "+254 712 345 678"}}],
+    "kwargs", [{"json": {"phone_number": "0712345678"}}, {"json": {"phone_number": "+254 712 345 678"}}]
 )
-async def test_a_replay_without_a_number_or_with_the_same_number_is_202_without_daraja(
-    api_client, application, settings, kwargs
-):
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
+async def test_a_replay_with_the_same_number_is_202_without_daraja(api_client, application, settings, kwargs):
+    buyer = make_buyer()
     order = make_order(buyer.id)
     db = replay_db(buyer, order, existing_payment(buyer, order))
     daraja = FakeDaraja(db)
@@ -326,6 +328,16 @@ async def test_a_replay_without_a_number_or_with_the_same_number_is_202_without_
     assert response.status_code == 202, response.text
     assert daraja.pushes == [] and db.payments == []
     assert not statements_with(db, "pg_advisory_xact_lock")
+
+
+async def test_a_replay_without_a_number_is_422_phone_required(api_client, application, settings):
+    buyer = make_buyer()
+    order = make_order(buyer.id)
+    db = replay_db(buyer, order, existing_payment(buyer, order))
+    install(application, db, buyer, FakeDaraja(db))
+    response = await post_pay(api_client, order.id)
+    assert without_request_id(response.json()) == PHONE_REQUIRED
+    assert db.statements == []
 
 
 async def test_a_replay_with_a_different_number_is_409(api_client, application, settings):
@@ -438,7 +450,7 @@ async def test_the_per_buyer_hourly_limit_has_its_own_code_and_retry_after(api_c
     oldest = NOW - timedelta(minutes=45)
     db = FakeDB(scalars=[None, order, NOW, 0, 0, 10, oldest], lists=[[]])
     install(application, db, buyer, FakeDaraja(db))
-    response = await post_pay(api_client, order.id)
+    response = await post_pay(api_client, order.id, json={"phone_number": "0712345678"})
     assert response.status_code == 429
     assert without_request_id(response.json()) == {
         "error": {
@@ -538,7 +550,7 @@ async def test_the_advisory_lock_comes_first_no_listing_is_locked_and_commit_pre
 async def test_numbers_are_masked_in_the_response_events_and_logs(api_client, application, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG)
     use_settings(monkeypatch, payment_settings(mpesa_stk_target="test_msisdn"))
-    buyer = make_buyer(phone_number=PROFILE_PHONE)
+    buyer = make_buyer()
     order = make_order(buyer.id)
     view = view_row(
         order,
@@ -561,7 +573,7 @@ async def test_numbers_are_masked_in_the_response_events_and_logs(api_client, ap
         "logs": caplog.text,
     }
     for name, haystack in haystacks.items():
-        for raw in ("254733444555", "0733444555", "0733 444 555", PROFILE_PHONE, TEST_MSISDN):
+        for raw in ("254733444555", "0733444555", "0733 444 555", TEST_MSISDN):
             assert raw not in haystack, f"{raw} leaked into {name}"
 
 
