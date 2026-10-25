@@ -181,8 +181,7 @@ async def forecast_accuracy(
     item_clauses = clauses if include_pending else [*clauses, "not is_pending"]
     # The where clauses are constant fragments from _accuracy_filters; values are always bound parameters.
     total = int(
-        await session.scalar(text("select count(*) from public.forecast_accuracy" + _where(item_clauses)), params)
-        or 0
+        await session.scalar(text("select count(*) from public.forecast_accuracy" + _where(item_clauses)), params) or 0
     )
     rows = (
         (

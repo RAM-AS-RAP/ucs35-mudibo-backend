@@ -66,7 +66,13 @@ async def cancel_order(
     return await order_service.cancel_order(session, buyer, order_id)
 
 
-@router.post("/{order_id}/pay", status_code=status.HTTP_202_ACCEPTED, response_model=PaymentStartOut)
+@router.post(
+    "/{order_id}/pay",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PaymentStartOut,
+    # The body is required; a missing one is answered with 422 phone_required by the service.
+    openapi_extra={"requestBody": {"required": True}},
+)
 @limiter.limit("10/minute")
 async def pay_order(
     request: Request,
@@ -80,8 +86,8 @@ async def pay_order(
 ) -> PaymentStartOut:
     """Send an M-Pesa STK prompt for the buyer's order to the number entered for this payment.
 
-    The body is optional: none, ``{}``, or ``{"phone_number": "..."}``. The amount always comes from
-    the server.
+    The body ``{"phone_number": "..."}`` is required: a missing body, a missing field or an empty value
+    gives 422 ``phone_required``. The amount always comes from the server.
     """
     del request
     raw_key = payment_service.validate_idempotency_key(idempotency_key)

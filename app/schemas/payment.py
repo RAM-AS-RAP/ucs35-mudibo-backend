@@ -4,19 +4,27 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-# Checked for length only here; the service normalises it and answers 422 invalid_phone when it is not
-# a valid Safaricom number, so the message is the same for every bad format.
-EnteredPhone = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=20)]
+# Checked for length only here; the service answers 422 phone_required when the number is missing or
+# empty and 422 invalid_phone when it is not a valid Safaricom number, so the message is the same for
+# every bad format.
+EnteredPhone = Annotated[str, StringConstraints(strip_whitespace=True, max_length=20)]
 
 
 class PayRequest(BaseModel):
-    """Optional body of ``POST /orders/{id}/pay``: the M-Pesa number to send the prompt to."""
+    """Body of ``POST /orders/{id}/pay``: the M-Pesa number to send the prompt to (required).
 
-    model_config = ConfigDict(extra="forbid")
+    Accounts have no phone number, so this is the only source of the number. A missing body, a missing
+    field or an empty value is answered with 422 ``phone_required`` by the service (not by validation),
+    which is why the field is optional to the validator but required in the published schema.
+    """
 
-    phone_number: EnteredPhone | None = None
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"required": ["phone_number"]})
+
+    phone_number: EnteredPhone | None = Field(
+        default=None, description="The M-Pesa number for this payment, for example 0712 345 678."
+    )
 
 
 class PaymentRead(BaseModel):

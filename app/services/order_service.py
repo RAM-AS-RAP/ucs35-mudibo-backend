@@ -214,9 +214,7 @@ ORDER_VIEW_JOINS = """
 """
 
 # Composed once from the constant fragments above; values are always bound parameters.
-ORDER_VIEW_BY_ID_SQL = (
-    "select " + ORDER_VIEW_COLUMNS + " " + ORDER_VIEW_JOINS + " where o.id = cast(:order_id as uuid)"
-)
+ORDER_VIEW_BY_ID_SQL = "select " + ORDER_VIEW_COLUMNS + " " + ORDER_VIEW_JOINS + " where o.id = cast(:order_id as uuid)"
 
 MY_ORDERS_SQL = (
     """

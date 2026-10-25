@@ -1,7 +1,5 @@
 """Helpers for safe free-text search with LIKE/ILIKE."""
 
-import re
-
 LIKE_ESCAPE = "\\"
 
 
@@ -16,15 +14,3 @@ def contains_pattern(value: str) -> str:
 
 def prefix_pattern(value: str) -> str:
     return f"{escape_like(value.strip())}%"
-
-
-def phone_prefix(value: str) -> str | None:
-    """Digits of a phone-like ``value`` as a stored-phone prefix (a leading 0 becomes 254), else None."""
-    if not re.fullmatch(r"[\d\s+()-]+", value.strip()):
-        return None
-    digits = re.sub(r"\D", "", value)
-    if not digits:
-        return None
-    if digits.startswith("0"):
-        digits = "254" + digits[1:]
-    return digits

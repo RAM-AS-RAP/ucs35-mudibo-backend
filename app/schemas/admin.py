@@ -25,8 +25,8 @@ SearchQuery = Annotated[str | None, Query(min_length=SEARCH_MIN_LENGTH, max_leng
 class UserAdminOut(BaseModel):
     id: UUID
     name: str
-    phone_number: str
-    email: str | None
+    email: str
+    email_verified_at: datetime
     role: str
     is_super_admin: bool
     is_disabled: bool

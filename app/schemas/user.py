@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict
 
 
 class UserOut(BaseModel):
@@ -11,8 +11,7 @@ class UserOut(BaseModel):
 
     id: UUID
     name: str
-    phone_number: str
-    email: EmailStr | None
+    email: str
     role: str
     # Always read from the users row (false for everyone but the super admin); never from the token.
     is_super_admin: bool
