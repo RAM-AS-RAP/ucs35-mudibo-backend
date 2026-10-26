@@ -6,6 +6,7 @@ any other flag. The role of a registration comes only from the route. Sign in re
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
@@ -14,6 +15,11 @@ CODE_MAX_LENGTH = 20
 # Tokens are secrets.token_urlsafe(32) (43 characters); the bounds only reject obvious garbage.
 TOKEN_MIN_LENGTH = 16
 TOKEN_MAX_LENGTH = 128
+# A Google ID token (JWT) and the nonce issued by POST /auth/google/nonce.
+GOOGLE_CREDENTIAL_MIN_LENGTH = 20
+GOOGLE_CREDENTIAL_MAX_LENGTH = 8192
+GOOGLE_NONCE_MIN_LENGTH = 20
+GOOGLE_NONCE_MAX_LENGTH = 128
 
 
 def validate_password_policy(value: object) -> object:
@@ -152,3 +158,29 @@ class PasswordChangedResponse(BaseModel):
 
     message: str
     login_required: bool = True
+
+
+# Google sign in --------------------------------------------------------------------------------
+
+
+class GoogleNonceOut(BaseModel):
+    """A single use nonce for Google's sign in initialisation; only its hash is stored."""
+
+    nonce: str
+    expires_in: int
+
+
+class GoogleSignInRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    credential: str = Field(min_length=GOOGLE_CREDENTIAL_MIN_LENGTH, max_length=GOOGLE_CREDENTIAL_MAX_LENGTH)
+    nonce: str = Field(min_length=GOOGLE_NONCE_MIN_LENGTH, max_length=GOOGLE_NONCE_MAX_LENGTH)
+
+
+class GoogleSignupRequest(BaseModel):
+    """The one time role choice of a new Google account; administrators can never be created here."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signup_token: str = Field(min_length=TOKEN_MIN_LENGTH, max_length=TOKEN_MAX_LENGTH)
+    role: Literal["farmer", "buyer"]

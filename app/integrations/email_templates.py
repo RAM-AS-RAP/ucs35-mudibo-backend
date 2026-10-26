@@ -86,6 +86,7 @@ def account_exists_email(to: str) -> EmailMessage:
     lines = [
         "Someone tried to register with this email address, but an account already exists.",
         "If it was you, sign in, or use Forgot password if you do not remember your password.",
+        "If you usually sign in with Google, choose Continue with Google.",
         "If it was not you, you can ignore this email.",
     ]
     return EmailMessage(

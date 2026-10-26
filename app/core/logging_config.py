@@ -25,7 +25,7 @@ _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"
 
 _SENSITIVE_KEY = (
     r"[\w-]*password|[\w-]*passwd|[\w-]*token|authorization|api[-_]?key|[\w-]*secret|passkey|pepper"
-    r"|(?:invite_|reset_|verification_|registration_|login_)?code"
+    r"|(?:invite_|reset_|verification_|registration_|login_)?code|credential|nonce"
 )
 _KEY_VALUE = re.compile(
     r"(?i)(?<![\w-])(" + _SENSITIVE_KEY + r")(?![\w-])"

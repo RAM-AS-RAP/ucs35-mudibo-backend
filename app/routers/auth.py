@@ -1,6 +1,7 @@
-"""Registration, sign in, invite acceptance and password reset routes.
+"""Registration, sign in (password or Google), invite acceptance and password reset routes.
 
-Every sign in endpoint answers with ``AuthResult`` (fields that do not apply are omitted). Responses
+Every sign in endpoint answers with ``AuthResult`` (``POST /auth/google`` with ``GoogleAuthResult``, which
+adds the ``role_required`` status); fields that do not apply are omitted. Responses
 that carry a token or a challenge are marked ``Cache-Control: no-store`` (the middleware also sets it
 on every response).
 """
@@ -10,13 +11,17 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth_result import AuthResult
+from app.core.auth_result import AuthResult, GoogleAuthResult
 from app.core.dependencies import get_current_user_any
 from app.db import get_db
+from app.integrations.google import GoogleVerifier, get_google_verifier
 from app.models.enums import UserRole
 from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordRequest,
+    GoogleNonceOut,
+    GoogleSignInRequest,
+    GoogleSignupRequest,
     LoginRequest,
     LoginResendOut,
     LoginResendRequest,
@@ -30,7 +35,13 @@ from app.schemas.auth import (
 )
 from app.schemas.invite import AcceptedOut, AcceptInviteRequest, EmailRequest, PasswordResetConfirmRequest
 from app.schemas.user import UserOut
-from app.services import auth_service, invite_service, password_reset_service, registration_service
+from app.services import (
+    auth_service,
+    google_auth_service,
+    invite_service,
+    password_reset_service,
+    registration_service,
+)
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -137,8 +148,56 @@ async def change_password(
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: User = Depends(get_current_user_any)) -> User:
-    return user
+async def me(user: User = Depends(get_current_user_any), session: AsyncSession = Depends(get_db)) -> UserOut:
+    google_linked = await google_auth_service.is_google_linked(session, user.id)
+    return UserOut(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        role=str(getattr(user.role, "value", user.role)),
+        is_super_admin=user.is_super_admin,
+        must_change_password=user.must_change_password,
+        password_set=auth_service.password_is_set(user),
+        google_linked=google_linked,
+        created_at=user.created_at,
+    )
+
+
+# Google sign in (farmers and buyers; see app/services/google_auth_service.py) --------------------
+
+
+@router.post("/google/nonce", response_model=GoogleNonceOut)
+@limiter.limit("20/minute")
+async def google_nonce(
+    request: Request, response: Response, session: AsyncSession = Depends(get_db)
+) -> GoogleNonceOut:
+    del request
+    response.headers["Cache-Control"] = NO_STORE
+    return await google_auth_service.issue_nonce(session)
+
+
+@router.post("/google", response_model=GoogleAuthResult, response_model_exclude_none=True)
+@limiter.limit("10/minute")
+async def google_sign_in(
+    request: Request,
+    response: Response,
+    body: GoogleSignInRequest,
+    session: AsyncSession = Depends(get_db),
+    verifier: GoogleVerifier = Depends(get_google_verifier),
+) -> GoogleAuthResult:
+    del request
+    response.headers["Cache-Control"] = NO_STORE
+    return await google_auth_service.sign_in(session, verifier, body.credential, body.nonce)
+
+
+@router.post("/google/complete", response_model=AuthResult, response_model_exclude_none=True, status_code=201)
+@limiter.limit("10/minute")
+async def google_complete(
+    request: Request, response: Response, body: GoogleSignupRequest, session: AsyncSession = Depends(get_db)
+) -> AuthResult:
+    del request
+    response.headers["Cache-Control"] = NO_STORE
+    return await google_auth_service.complete(session, body.signup_token, body.role)
 
 
 # Invitations and password reset ----------------------------------------------------------------

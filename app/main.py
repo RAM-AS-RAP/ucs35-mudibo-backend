@@ -22,6 +22,7 @@ from app.core.middleware import BodySizeLimitMiddleware, RequestContextMiddlewar
 from app.db import get_engine
 from app.integrations import email as email_integration
 from app.integrations.daraja import DarajaClient, DarajaConfigError, redact_callback_url
+from app.integrations.google import close_google_verifier
 from app.routers import admin, auth, forecasts, listings, markets, orders, payments, prices
 from app.services import payment_service
 
@@ -58,7 +59,7 @@ def install_access_log_filter() -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    """Create one sandbox Daraja client for the application and close it on shutdown."""
+    """Create one sandbox Daraja client for the application; close it and the Google key client on shutdown."""
     try:
         client: DarajaClient | None = DarajaClient(get_settings())
     except DarajaConfigError as exc:
@@ -71,6 +72,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     finally:
         if client is not None:
             await client.aclose()
+        await close_google_verifier()
 
 
 def rate_limit_retry_after(request: Request, exc: RateLimitExceeded) -> int:
