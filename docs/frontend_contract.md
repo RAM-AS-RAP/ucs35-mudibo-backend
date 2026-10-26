@@ -24,7 +24,7 @@ Accounts are email only. **Phone numbers are gone from every account, registrati
 
 ### AuthResult
 
-Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`) returns `AuthResult`. Branch on `status`; fields that do not apply are absent.
+Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`, `POST /auth/google/complete`) returns `AuthResult`; `POST /auth/google` returns the same `signed_in` shape or `role_required` (see [Google sign in](#google-sign-in)). Branch on `status`; fields that do not apply are absent.
 
 ```json
 {"status": "signed_in", "access_token": "...", "token_type": "bearer", "expires_in": 28800, "role": "farmer", "must_change_password": false, "is_super_admin": false}
@@ -39,7 +39,7 @@ Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST 
 
 ### Keep tokens in memory only
 
-The `registration_token` and the `challenge_token` are secrets for one flow. **Keep them in a variable in memory only** (component or store state): never in `localStorage`, `sessionStorage`, IndexedDB, a cookie, a URL, a query string or a log. If the page reloads, the user starts the flow again. The access token may be kept as before (memory or app-scoped storage).
+The `registration_token`, the `challenge_token`, the Google `nonce` and the Google `signup_token` are secrets for one flow. **Keep them in a variable in memory only** (component or store state): never in `localStorage`, `sessionStorage`, IndexedDB, a cookie, a URL, a query string or a log. If the page reloads, the user starts the flow again. The access token may be kept as before (memory or app-scoped storage).
 
 ### Registration sequence
 
@@ -61,12 +61,43 @@ The `registration_token` and the `challenge_token` are secrets for one flow. **K
 5. 429 `too_many_login_codes` (more than 10 sign ins in an hour) carries `Retry-After`; disable the sign in button for that long.
 6. A new sign in replaces the previous challenge, so a code from an earlier attempt stops working.
 
+### Google sign in
+
+Farmers and buyers can choose "Continue with Google" instead of email, password and code. Administrators cannot (their sign in screen should not offer it). Google sign in needs **no emailed code**. Use Google Identity Services with the client ID in `VITE_GOOGLE_CLIENT_ID` (the same value as the backend's `GOOGLE_CLIENT_ID`; setup in [google-setup.md](google-setup.md)). If `POST /auth/google/nonce` answers 503 `google_unavailable`, hide the Google button.
+
+1. `POST /auth/google/nonce` (no body) returns `{"nonce", "expires_in"}`. Request a fresh nonce for every attempt, right before showing the Google button or prompt; it is single use and expires after `expires_in` seconds (300).
+2. Pass that nonce to Google's initialisation (`google.accounts.id.initialize({client_id, nonce, callback, ...})`), so Google puts it in the ID token.
+3. In the callback, send `POST /auth/google` with `{"credential": <response.credential>, "nonce": <the same nonce>}`. Do not decode or trust the credential on the client.
+4. Branch on `status`:
+   - `signed_in`: the usual `AuthResult` fields. Store the access token and route by `role`, exactly as after a password sign in.
+   - `role_required`: no account exists for this Google email yet. Show a one time choice "I am a farmer" / "I am a buyer" with the returned `name` and `email`. Keep `signup_token` **in memory only** (a component or store variable): never in `localStorage`, `sessionStorage`, IndexedDB, a cookie, a URL, a query string, router or history state, or a log. It expires at `signup_expires_at` (10 minutes).
+5. `POST /auth/google/complete` with `{"signup_token", "role": "farmer" | "buyer"}` returns **201** `AuthResult` (`signed_in`). The role is chosen once; later Google sign ins go straight to `signed_in`.
+6. If the user signs in with Google again before choosing, the earlier `signup_token` stops working; use the newest.
+
+Errors (show the message; offer "Use email and password instead"):
+
+| Code | Status | Client action and message |
+| --- | --- | --- |
+| `google_sign_in_failed` | 401 | "Google sign in did not work. Please try again or use your email and password." Get a new nonce before retrying. |
+| `google_not_allowed` | 403 | "Administrator accounts sign in with email and password." Show the password form. |
+| `google_conflict` | 409 | "A different Google account is already connected to this email. Use that Google account, or sign in with your email and password." |
+| `google_retry` | 409 | "Please try signing in with Google again." Drop the `signup_token` and restart from step 1. |
+| `invalid_or_expired_ticket` | 400 | "Your Google sign in expired. Please try again." Drop the `signup_token` and restart from step 1. |
+| `google_unavailable` | 503 | "Google sign in is not available right now. Please use your email and password." (`Retry-After: 5`) |
+
+Notes:
+
+- An account with the same verified email is connected to Google automatically on the first Google sign in; its role never changes.
+- An account created with Google has **no password**. `GET /auth/me` returns `password_set: false` and `google_linked: true`. To set a password, the user uses **Forgot password** (`POST /auth/password-reset/request`, then `/confirm` with the emailed code); after that, password sign in (with a code) works too and `password_set` is true. On the change-password screen, if `password_set` is false, show "You have not set a password yet. Use Forgot password to set one." instead of the form (the API answers 409 `password_not_set`).
+- There is **no way to disconnect Google** and no "connect Google" button inside the app: connecting happens only by signing in with Google.
+- Google's popup sign in needs the frontend host to send a `Cross-Origin-Opener-Policy` that allows popups (`same-origin-allow-popups` or none); do not set `same-origin`.
+
 ### Session rules
 
 - Send `Authorization: Bearer <access_token>` on every other call.
 - **On any 401, clear the stored session and go to the sign in screen.** A 401 also happens after the account is disabled or the password was changed or reset on another device.
 - Route the user by `role` (`farmer`, `buyer`, `admin`). The super admin is an `admin` account with `is_super_admin: true`. Read the flag from the `AuthResult` or, after a reload, from `GET /auth/me`; both come from the database row (the token does not carry it). Show the super admin screens (Invites, email check) only when it is true. Do not probe the invite routes to find out: they are rate limited.
-- `GET /auth/me` returns `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at`.
+- `GET /auth/me` returns `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `password_set`, `google_linked`, `created_at`. `password_set` is false only for an account created with Google that has not set a password yet; `google_linked` says whether a Google account is connected.
 - If `must_change_password` is true, or any call returns **403 `password_change_required`**, show the change-password screen. Only `POST /auth/change-password` and `GET /auth/me` work until then. After a successful change, the response says `login_required: true`. Discard the token and sign in again (password and code).
 
 ## Pagination
@@ -100,6 +131,13 @@ Suggested user messages:
 | `password_change_required` | 403 | "Please set a new password to continue." |
 | `forbidden` | 403 | "You don't have access to this page." |
 | `wrong_current_password` | 400 | "Your current password is incorrect." |
+| `password_not_set` | 409 | "You have not set a password yet. Use Forgot password to set one." |
+| `google_sign_in_failed` | 401 | "Google sign in did not work. Please try again or use your email and password." |
+| `google_not_allowed` | 403 | "Administrator accounts sign in with email and password." |
+| `google_conflict` | 409 | "A different Google account is already connected to this email. Use that Google account, or sign in with your email and password." |
+| `google_retry` | 409 | "Please try signing in with Google again." |
+| `invalid_or_expired_ticket` | 400 | "Your Google sign in expired. Please try again." |
+| `google_unavailable` | 503 | "Google sign in is not available right now. Please use your email and password." |
 | `password_too_weak` | 422 | "Choose a stronger password." plus the `reason` |
 | `validation_error` | 422 | "Please check the highlighted fields." |
 | `body_not_allowed` | 422 | "Something went wrong. Please try again." (client bug) |
@@ -167,6 +205,7 @@ Any other code: show the generic message plus the reference.
 | --- | --- | --- |
 | Register, confirm email | public | `POST /auth/register/farmer`, `POST /auth/register/buyer`, `POST /auth/register/verify`, `POST /auth/register/resend` |
 | Sign in, sign in code | public | `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/login/resend`, then `GET /auth/me` |
+| Continue with Google, choose farmer or buyer | public | `POST /auth/google/nonce`, `POST /auth/google`, `POST /auth/google/complete`, then `GET /auth/me` |
 | Change password | all signed-in users | `POST /auth/change-password` |
 | Forgot password, reset password | public | `POST /auth/password-reset/request`, `POST /auth/password-reset/confirm` |
 | Accept admin invitation | public | `POST /auth/accept-invite`, `POST /auth/invite/request-code` |

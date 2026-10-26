@@ -96,3 +96,18 @@
 - `PayRequest.phone_number` is required; a missing body, field or value is 422 `phone_required`, decided by the service so the code is stable.
 - `scripts/admin_recovery.py` (behind `ALLOW_ADMIN_RECOVERY=1`) lets an operator with database access reset an admin password or issue a sign in code when email is down.
 - Old registrations, login challenges and reset codes are deleted after 2 days by the `cleanup-auth-codes` pg_cron job; invites are kept as history.
+
+# Google sign in decisions
+
+- Farmers and buyers may sign in with Google instead of email, password and code; Google sign in needs no password and no emailed code because Google has authenticated the person and the ID token carries a verified email (`LOGIN_OTP_ROLES` applies to password sign in only).
+- Administrators never use Google: no linking and no sign in (403 `google_not_allowed`); admin accounts stay invitation only.
+- The first Google sign in with an email that has no account returns `role_required` and a single use ticket; the person chooses farmer or buyer once at `POST /auth/google/complete`, and no user row exists before that choice.
+- A Google verified email that matches an existing account signs it in and links the Google identity automatically; this is safe only because every account email is verified and the Google email must be verified too. The role of an existing account never changes.
+- An identity is bound to the Google subject: later sign ins follow the subject, and a second, different Google account for an account that already has one is refused (409 `google_conflict`), never linked.
+- A Google created account has `password_set = false` and the Argon2 hash of a random value; it sets a password only through the emailed "forgot password" code, which also sets `password_set = true`. Password sign in fails for it exactly like a wrong password, and change-password answers 409 `password_not_set`.
+- There is no unlink route and no signed in linking route: with automatic linking by verified email an unlink would be undone at the next Google sign in, and linking a different Google email from a signed in session would let a stolen token create lasting access.
+- ID tokens are verified in the backend with PyJWT against Google's JWKS at a fixed URL: RS256 only, audience, issuer, expiry, `iat` window, verified email, `azp`, and a single use nonce issued by the backend and claimed in its own committed transaction.
+- Nonces and signup tickets are `secrets.token_urlsafe(32)` stored as SHA-256 hex, like the other tokens; old rows are deleted after 2 days by the `cleanup-google-auth` pg_cron job, and identities are never cleaned up.
+- Every Google failure that could tell accounts apart (verification, nonce, disabled account) is one 401 `google_sign_in_failed`; the admin and conflict answers are specific because the Google email is proven to belong to the caller.
+- `GOOGLE_CLIENT_ID` empty disables Google sign in (503 `google_unavailable`) without affecting anything else, so the feature is optional per deployment.
+- The registration "account exists" email says "If you usually sign in with Google, choose Continue with Google." It goes only to the address owner and does not reveal whether Google is used.

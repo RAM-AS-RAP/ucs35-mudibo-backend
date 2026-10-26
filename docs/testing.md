@@ -31,6 +31,10 @@ They build the app with `create_app()` and call it through `httpx.AsyncClient` a
 - `tests/test_registration.py` and `tests/test_login_codes.py` drive registration and two step sign in through the API against `tests/auth_fakes.py`, an in-memory stand-in for `users`, `pending_registrations` and `login_challenges` with a movable database clock, transactions and the database's uniqueness and single use rules.
 - `tests/test_identity_sources.py` walks the OpenAPI schema (no `phone_number` outside the pay request, no hash or `code` property in any response) and parses the auth code (no `random`, no logged codes, tokens or passwords, no `phone` in the account files).
 - `tests/test_check_config.py` tests the configuration checker with fake environments.
+- `tests/test_google_verifier.py` checks every Google ID token rule, the signing key cache and outages. RSA keys are generated in `tests/google_fakes.py`, tokens are signed with PyJWT and Google's key document is served through `httpx.MockTransport`; nothing touches the network.
+- `tests/test_google_sign_in.py` drives Google sign in through the API (nonces, role choice, linking, admins, conflicts, tickets, password interplay) against `tests/auth_fakes.py`, which also stands in for `user_identities`, `oauth_nonces` and `google_signups`.
+- `tests/test_google_sources.py` walks the OpenAPI schema (no credential, nonce, ticket or Google subject outside the allowed responses) and parses the Google code (RS256 only, the fixed key URL only, no `random`, no `print`, nothing secret logged).
+- `tests/test_google_db.py` (database tests) checks the Google migration's constraints, triggers, row level security and cleanup job, the service against Postgres, and two concurrency cases that commit (they leave one disabled `ZZ_TEST_` user with its Google identity each).
 
 ## Database tests
 
