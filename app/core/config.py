@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     google_jwks_cache_seconds: int = 3600
     google_clock_skew_seconds: int = 60
     google_max_token_age_seconds: int = 900
-    email_provider:Literal["console", "smtp", "resend", "brevo"] = "console"
+    email_provider: Literal["console", "smtp", "resend", "brevo"] = "console"
     email_api_key: str = ""
     email_from_name: str = "Admin via AgriSence"
     email_from_address: str = ""
