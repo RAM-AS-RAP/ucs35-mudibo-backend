@@ -37,6 +37,13 @@ the number entered for the payment as ``{"phone_number": ...}`` (required); ``si
 that a missing number is 422 ``phone_required`` and replays the key with the same number (same result)
 and with a different number (409 ``idempotency_key_reused``).
 
+Google sign in. A full Google sign in needs a real Google account in a browser, so it can only be tested
+by hand in the frontend. When the server has ``GOOGLE_CLIENT_ID`` (read from the environment or
+``.env``), the script checks only what can be automated: ``POST /auth/google/nonce`` returns a nonce,
+``POST /auth/google`` with a garbage credential returns the generic 401 without details, and
+``POST /auth/google/complete`` with a random ticket returns 400. Without a client ID those steps are
+SKIPPED with the reason.
+
 Safety: the script refuses to run when ``APP_ENV`` is ``production`` and, unless ``E2E_ALLOW_REMOTE=1``,
 when the base URL is not localhost. It never prints tokens, passwords, codes, full email addresses or
 full phone numbers. Test users are named ``ZZ_E2E_<random>``; users cannot be deleted (a database
@@ -270,6 +277,7 @@ class E2ERun:
         self.listing_ids: list[str] = []
         self.order: dict[str, Any] | None = None
         self.admin_ready = False
+        self.google_nonce: str | None = None
 
     async def _check_headers(self, response: httpx.Response) -> None:
         if not response.headers.get("x-request-id") or response.headers.get("cache-control") != "no-store":
@@ -344,6 +352,42 @@ class E2ERun:
         await self.step("system", "database health", database_health)
         await self.step("system", "CORS preflight", cors)
         await self.step("system", "unknown route body", unknown_route)
+
+    # 1b. Google sign in (only what can be automated) -------------------------------------------
+
+    async def google_sign_in(self) -> None:
+        if not env_or_dotenv("GOOGLE_CLIENT_ID").strip():
+            reason = "GOOGLE_CLIENT_ID is not configured, so the Google routes answer 503"
+            self.results.append(Result("google", "google sign in", SKIP, reason))
+            return
+
+        async def nonce() -> str:
+            body = expect(await self.api("POST", "/auth/google/nonce"), 200)
+            if set(body) != {"nonce", "expires_in"} or len(body["nonce"]) < 20:
+                raise StepFailed("the nonce response has an unexpected shape")
+            self.google_nonce = body["nonce"]
+            return f"nonce valid for {body['expires_in']} seconds"
+
+        async def garbage_credential() -> str:
+            if not self.google_nonce:
+                raise StepSkipped("no nonce")
+            body = {"credential": "zz-e2e-not-a-google-id-token-" + secrets.token_hex(16), "nonce": self.google_nonce}
+            error = expect(await self.api("POST", "/auth/google", json=body), 401, "google_sign_in_failed")
+            if set(error.get("error", {})) != {"code", "message", "request_id"}:
+                raise StepFailed("the 401 body carries more than the generic error fields")
+            return "generic 401, no details"
+
+        async def random_ticket() -> str:
+            body = {"signup_token": secrets.token_urlsafe(32), "role": "farmer"}
+            expect(await self.api("POST", "/auth/google/complete", json=body), 400, "invalid_or_expired_ticket")
+            return "400 invalid_or_expired_ticket"
+
+        await self.step("google", "nonce", nonce)
+        await self.step("google", "garbage credential", garbage_credential)
+        await self.step("google", "random signup ticket", random_ticket)
+        self.results.append(
+            Result("google", "full Google sign in", SKIP, "needs a real Google account in a browser; test by hand")
+        )
 
     # 2. Farmer --------------------------------------------------------------------------------
 
@@ -920,6 +964,7 @@ class E2ERun:
     async def run(self) -> int:
         try:
             await self.system()
+            await self.google_sign_in()
             await self.farmer_journey()
             await self.buyer_journey()
             await self.payments()

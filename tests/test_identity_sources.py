@@ -23,6 +23,8 @@ AUTH_FILES = [
     APP_DIR / "services" / "invite_service.py",
     APP_DIR / "services" / "password_reset_service.py",
     APP_DIR / "services" / "email_delivery.py",
+    APP_DIR / "services" / "google_auth_service.py",
+    APP_DIR / "integrations" / "google.py",
     APP_DIR / "routers" / "auth.py",
     ROOT / "scripts" / "admin_recovery.py",
     ROOT / "scripts" / "seed_admin.py",

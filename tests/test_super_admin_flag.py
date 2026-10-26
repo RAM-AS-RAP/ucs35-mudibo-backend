@@ -126,7 +126,17 @@ async def test_me_returns_the_flag_from_the_database_row(api_client, application
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["is_super_admin"] is super_admin
-    assert set(body) == {"id", "name", "email", "role", "is_super_admin", "must_change_password", "created_at"}
+    assert set(body) == {
+        "id",
+        "name",
+        "email",
+        "role",
+        "is_super_admin",
+        "must_change_password",
+        "password_set",
+        "google_linked",
+        "created_at",
+    }
     assert "password_hash" not in body and "is_disabled" not in body and "phone_number" not in body
 
 
