@@ -196,8 +196,10 @@ async def test_invalid_numbers_are_422_invalid_phone(api_client, application, se
     assert response.status_code == 422
     assert without_request_id(response.json()) == INVALID_PHONE
     assert db.statements == [] and daraja.pushes == []
-    # The submitted value is never echoed (the fixed example number in the message is ignored).
-    assert raw not in response.text.replace(INVALID_PHONE["error"]["message"], "")
+    # The submitted value is never echoed (the fixed example number in the message and the random
+    # request_id, which can contain short values such as "07", are ignored).
+    echoed = response.text.replace(response.json()["error"]["request_id"], "")
+    assert raw not in echoed.replace(INVALID_PHONE["error"]["message"], "")
 
 
 # Resolution ----------------------------------------------------------------------------------
