@@ -12,6 +12,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _URL_SAFE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
 _PHONE = re.compile(r"254[17][0-9]{8}")
 _HOST_NAME = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?")
+GOOGLE_CLIENT_ID_SUFFIX = ".apps.googleusercontent.com"
+_GOOGLE_CLIENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*" + re.escape(GOOGLE_CLIENT_ID_SUFFIX))
 LOGIN_OTP_ROLE_CHOICES = ("farmer", "buyer", "admin")
 
 
@@ -116,6 +118,13 @@ class Settings(BaseSettings):
     login_max_sends: int = 3
     login_resend_cooldown_seconds: int = 60
     login_challenges_per_hour: int = 10
+    # Google sign in for farmers and buyers. Empty disables it: every Google route answers 503.
+    google_client_id: str = ""
+    google_nonce_ttl_seconds: int = 300
+    google_signup_ttl_minutes: int = 10
+    google_jwks_cache_seconds: int = 3600
+    google_clock_skew_seconds: int = 60
+    google_max_token_age_seconds: int = 900
     email_provider: Literal["console", "smtp", "resend", "brevo"] = "console"
     email_api_key: str = ""
     email_from_name: str = "Admin via AgriSence"
@@ -392,6 +401,49 @@ class Settings(BaseSettings):
             raise ValueError("LOGIN_CHALLENGES_PER_HOUR must be between 1 and 100")
         return value
 
+    @field_validator("google_client_id")
+    @classmethod
+    def validate_google_client_id(cls, value: str) -> str:
+        value = value.strip()
+        if value and not _GOOGLE_CLIENT_ID.fullmatch(value):
+            raise ValueError(f"GOOGLE_CLIENT_ID must be a Google OAuth client ID ending with {GOOGLE_CLIENT_ID_SUFFIX}")
+        return value
+
+    @field_validator("google_nonce_ttl_seconds")
+    @classmethod
+    def validate_google_nonce_ttl(cls, value: int) -> int:
+        if not 60 <= value <= 900:
+            raise ValueError("GOOGLE_NONCE_TTL_SECONDS must be between 60 and 900")
+        return value
+
+    @field_validator("google_signup_ttl_minutes")
+    @classmethod
+    def validate_google_signup_ttl(cls, value: int) -> int:
+        if not 2 <= value <= 30:
+            raise ValueError("GOOGLE_SIGNUP_TTL_MINUTES must be between 2 and 30")
+        return value
+
+    @field_validator("google_jwks_cache_seconds")
+    @classmethod
+    def validate_google_jwks_cache(cls, value: int) -> int:
+        if not 60 <= value <= 86_400:
+            raise ValueError("GOOGLE_JWKS_CACHE_SECONDS must be between 60 and 86400")
+        return value
+
+    @field_validator("google_clock_skew_seconds")
+    @classmethod
+    def validate_google_clock_skew(cls, value: int) -> int:
+        if not 0 <= value <= 300:
+            raise ValueError("GOOGLE_CLOCK_SKEW_SECONDS must be between 0 and 300")
+        return value
+
+    @field_validator("google_max_token_age_seconds")
+    @classmethod
+    def validate_google_max_token_age(cls, value: int) -> int:
+        if not 60 <= value <= 3600:
+            raise ValueError("GOOGLE_MAX_TOKEN_AGE_SECONDS must be between 60 and 3600")
+        return value
+
     @field_validator("invite_max_sends")
     @classmethod
     def validate_invite_max_sends(cls, value: int) -> int:
@@ -495,6 +547,11 @@ class Settings(BaseSettings):
     def allowed_host_list(self) -> list[str]:
         """Hosts for TrustedHostMiddleware; ``["*"]`` when unset outside production."""
         return split_csv(self.allowed_hosts) or ["*"]
+
+    @property
+    def google_configured(self) -> bool:
+        """Report whether Google sign in is enabled (a client ID is set)."""
+        return bool(self.google_client_id)
 
     @property
     def codes_configured(self) -> bool:

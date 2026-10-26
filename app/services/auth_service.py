@@ -181,13 +181,27 @@ async def find_user_by_email(session: AsyncSession, email: str) -> User | None:
     return await session.scalar(select(User).where(func.lower(User.email) == email.strip().lower()))
 
 
+def password_is_set(user: Any) -> bool:
+    """False only for an account created with Google that has not set a password yet.
+
+    Rows always carry ``password_set``; a missing attribute (a partial test double) counts as set.
+    """
+    return getattr(user, "password_set", True) is not False
+
+
 async def authenticate(session: AsyncSession, email: str, password: str) -> User:
-    """Authenticate with indistinguishable errors and equalized missing-user work."""
+    """Authenticate with indistinguishable errors and equalized missing-user work.
+
+    An account without a password (created with Google) fails exactly like a wrong password: the
+    stored (random, unknown) hash is still verified, so the work and the answer are the same.
+    """
     user = await find_user_by_email(session, email)
     if user is None:
         verify_password(DUMMY_HASH, password)
         raise InvalidCredentials()
     if not verify_password(user.password_hash, password):
+        raise InvalidCredentials()
+    if not password_is_set(user):
         raise InvalidCredentials()
     if user.is_disabled:
         raise InvalidCredentials()
@@ -376,8 +390,16 @@ async def change_password(session: AsyncSession, user: User, current_password: s
     """Verify and replace the current password, clearing forced-change state.
 
     ``password_changed_at`` (database clock) revokes every access token issued before the change,
-    including the one used for this request, so the user must sign in again.
+    including the one used for this request, so the user must sign in again. An account created with
+    Google has no password to change yet: it gets 409 ``password_not_set`` and sets one through the
+    emailed reset code instead.
     """
+    if not password_is_set(user):
+        raise AppError(
+            status.HTTP_409_CONFLICT,
+            "password_not_set",
+            "You have not set a password yet. Use Forgot password to set one.",
+        )
     if not verify_password(user.password_hash, current_password):
         raise HTTPException(
             status_code=400,

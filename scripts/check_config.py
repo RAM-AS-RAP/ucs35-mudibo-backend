@@ -9,11 +9,13 @@ It reads the process environment and, for keys not set there, a ``.env`` file in
 prints a setting's value, only a status per check:
 
     OK        the setting is present and usable
-    MISSING   a required setting is empty
+    MISSING   a required setting is empty (for an optional feature such as Google sign in: the feature
+              is off, which is not an error)
     WEAK      present but below the recommended strength, or risky for this environment
     INVALID   present but the application would refuse it, or it breaks a production rule
 
-The exit code is 0 when every check is OK and 1 otherwise. The last line names the environment.
+The exit code is 0 when every check is OK (or an optional feature is MISSING) and 1 otherwise. The last
+line names the environment.
 """
 
 import os
@@ -37,6 +39,16 @@ _URL_SAFE = re.compile(r"[A-Za-z0-9_-]+")
 _PHONE = re.compile(r"254[17][0-9]{8}")
 _HOST = re.compile(r"(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?")
 _TRUE = {"1", "true", "yes", "on"}
+GOOGLE_CLIENT_ID_SUFFIX = ".apps.googleusercontent.com"
+_GOOGLE_CLIENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*" + re.escape(GOOGLE_CLIENT_ID_SUFFIX))
+# Allowed ranges, matching app.core.config.Settings.
+GOOGLE_LIMITS = {
+    "GOOGLE_NONCE_TTL_SECONDS": (60, 900),
+    "GOOGLE_SIGNUP_TTL_MINUTES": (2, 30),
+    "GOOGLE_JWKS_CACHE_SECONDS": (60, 86_400),
+    "GOOGLE_CLOCK_SKEW_SECONDS": (0, 300),
+    "GOOGLE_MAX_TOKEN_AGE_SECONDS": (60, 3600),
+}
 LOGIN_OTP_CHOICES = ("farmer", "buyer", "admin")
 LOGIN_OTP_DEFAULT = ("farmer", "buyer", "admin")
 # Allowed ranges, matching app.core.config.Settings.
@@ -62,6 +74,12 @@ class Check:
     item: str
     status: str
     note: str
+    # An optional feature that is simply off: reported as MISSING but not counted as a problem.
+    optional: bool = False
+
+    @property
+    def failing(self) -> bool:
+        return self.status in FAILING and not (self.optional and self.status == MISSING)
 
 
 def load_environment(environ: Mapping[str, str], env_file: Path | None = Path(".env")) -> dict[str, str]:
@@ -178,6 +196,30 @@ def check_login_codes(env: Mapping[str, str]) -> list[Check]:
         checks.append(Check("auth", "REG_* and LOGIN_* limits", INVALID, "out of range: " + ", ".join(invalid)))
     else:
         checks.append(Check("auth", "REG_* and LOGIN_* limits", OK, "within the allowed ranges"))
+    return checks
+
+
+def check_google(env: Mapping[str, str]) -> list[Check]:
+    """Google sign in is optional: an empty client ID turns it off (its routes answer 503)."""
+    checks = []
+    client_id = _get(env, "GOOGLE_CLIENT_ID")
+    if not client_id:
+        checks.append(
+            Check("auth", "GOOGLE_CLIENT_ID", MISSING, "Google sign in is disabled (not an error)", optional=True)
+        )
+    elif not _GOOGLE_CLIENT_ID.fullmatch(client_id):
+        checks.append(Check("auth", "GOOGLE_CLIENT_ID", INVALID, f"must end with {GOOGLE_CLIENT_ID_SUFFIX}"))
+    else:
+        checks.append(Check("auth", "GOOGLE_CLIENT_ID", OK, "Google sign in is enabled"))
+    invalid = [
+        key
+        for key, (low, high) in GOOGLE_LIMITS.items()
+        if _get(env, key) and not _int_in_range(_get(env, key), low, high)
+    ]
+    if invalid:
+        checks.append(Check("auth", "GOOGLE_* limits", INVALID, "out of range: " + ", ".join(invalid)))
+    else:
+        checks.append(Check("auth", "GOOGLE_* limits", OK, "within the allowed ranges"))
     return checks
 
 
@@ -333,6 +375,7 @@ def run_checks(env: Mapping[str, str]) -> list[Check]:
         *check_database(env),
         *check_jwt(env),
         *check_login_codes(env),
+        *check_google(env),
         *check_cors_and_hosts(env),
         *check_supabase(env),
         *check_mpesa(env),
@@ -349,7 +392,7 @@ def render(checks: list[Check], env: Mapping[str, str]) -> str:
     lines = [
         "  ".join(cell.ljust(widths[index]) if index < 3 else cell for index, cell in enumerate(row)) for row in rows
     ]
-    failing = sum(check.status in FAILING for check in checks)
+    failing = sum(check.failing for check in checks)
     lines.append("")
     lines.append(f"{len(checks) - failing} OK, {failing} need attention.")
     # The environment name is the only value printed; it is not a secret.
@@ -363,7 +406,7 @@ def main(
     env = load_environment(os.environ if environ is None else environ, env_file)
     checks = run_checks(env)
     print(render(checks, env), file=out)
-    return 1 if any(check.status in FAILING for check in checks) else 0
+    return 1 if any(check.failing for check in checks) else 0
 
 
 if __name__ == "__main__":

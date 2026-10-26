@@ -12,6 +12,7 @@ PEPPER = "p" * 48
 CALLBACK = "c" * 40
 DB_PASSWORD = "db-password-value-77"
 API_KEY = "email-api-key-value-88"
+GOOGLE_CLIENT_ID = "123456789012-checkconfigvalue.apps.googleusercontent.com"
 
 
 def valid_production() -> dict[str, str]:
@@ -36,6 +37,7 @@ def valid_production() -> dict[str, str]:
         "EMAIL_FROM_ADDRESS": "noreply@agrisence.test",
         "INVITE_CODE_PEPPER": PEPPER,
         "FRONTEND_BASE_URL": "https://app.agrisence.test",
+        "GOOGLE_CLIENT_ID": GOOGLE_CLIENT_ID,
     }
 
 
@@ -223,6 +225,43 @@ def test_identity_values_are_never_printed() -> None:
     for value in ("farmer,buyer,admin", "owner-address@agrisence.test", "someone@gmail.example"):
         assert value not in printed
     assert "SEED_ADMIN_PHONE" not in printed
+
+
+def test_google_client_id_ok_missing_or_invalid_and_never_printed() -> None:
+    assert status_of(valid_production(), "GOOGLE_CLIENT_ID") == OK
+
+    missing = {**valid_production(), "GOOGLE_CLIENT_ID": ""}
+    assert status_of(missing, "GOOGLE_CLIENT_ID") == MISSING
+    out = io.StringIO()
+    assert main(missing, env_file=None, out=out) == 0  # Google disabled is not an error
+    assert "0 need attention" in out.getvalue()
+
+    for value in ("my-client-id", "123.apps.googleusercontent.com.evil.example", "abc.apps.googleusercontent"):
+        invalid = {**valid_production(), "GOOGLE_CLIENT_ID": value}
+        assert status_of(invalid, "GOOGLE_CLIENT_ID") == INVALID, value
+        out = io.StringIO()
+        assert main(invalid, env_file=None, out=out) == 1
+        assert value not in out.getvalue()
+
+    out = io.StringIO()
+    main(valid_production(), env_file=None, out=out)
+    assert GOOGLE_CLIENT_ID not in out.getvalue() and "checkconfigvalue" not in out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("GOOGLE_NONCE_TTL_SECONDS", "30"),
+        ("GOOGLE_SIGNUP_TTL_MINUTES", "60"),
+        ("GOOGLE_JWKS_CACHE_SECONDS", "10"),
+        ("GOOGLE_CLOCK_SKEW_SECONDS", "301"),
+        ("GOOGLE_MAX_TOKEN_AGE_SECONDS", "soon"),
+    ],
+)
+def test_google_limits_out_of_range_are_invalid(setting, value) -> None:
+    env = {**valid_production(), setting: value}
+    check = next(c for c in run_checks(env) if c.item == "GOOGLE_* limits")
+    assert check.status == INVALID and setting in check.note
 
 
 def test_env_file_is_read_with_lower_precedence(tmp_path) -> None:

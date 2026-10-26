@@ -44,11 +44,23 @@ Public, 5 per hour per IP. JSON `challenge_token`. Returns 200 `{code_sent, rese
 
 ### POST /api/v1/auth/change-password
 
-Any authenticated user, also while a password change is required. Current and new password. Returns 200 with a note that the user must log in again; earlier tokens are revoked.
+Any authenticated user, also while a password change is required. Current and new password. Returns 200 with a note that the user must log in again; earlier tokens are revoked. An account created with Google that has not set a password yet gets 409 `password_not_set` ("You have not set a password yet. Use Forgot password to set one.").
 
 ### GET /api/v1/auth/me
 
-Any authenticated user. Returns the current account (`UserOut`), including `is_super_admin` read from the database row.
+Any authenticated user. Returns the current account (`UserOut`), including `is_super_admin` read from the database row, `password_set` (false only for an account created with Google that has not set a password) and `google_linked` (a Google account is connected). The Google account id is never returned.
+
+### POST /api/v1/auth/google/nonce
+
+Public, 20 per minute per IP. No body. Returns 200 `{"nonce", "expires_in"}`: a single use nonce (valid `GOOGLE_NONCE_TTL_SECONDS`, 300) to pass to Google's sign in initialisation; only its SHA-256 is stored. 503 `google_unavailable` (`Retry-After: 5`) when `GOOGLE_CLIENT_ID` is not set. See [Google sign in](#google-sign-in).
+
+### POST /api/v1/auth/google
+
+Public, 10 per minute per IP. Farmers and buyers only. JSON `credential` (the Google ID token, 20 to 8192 characters) and `nonce` (20 to 128 characters); unknown fields give 422. Returns 200 `GoogleAuthResult`: `status: "signed_in"` (the `AuthResult` fields; no sign in code) or `status: "role_required"` with `signup_token`, `email`, `name`, `signup_expires_at`. Errors: 401 `google_sign_in_failed` (one body for every verification, nonce and disabled account failure), 403 `google_not_allowed` (administrator email), 409 `google_conflict` (the account already has another Google account), 409 `google_retry`, 503 `google_unavailable`. See [Google sign in](#google-sign-in).
+
+### POST /api/v1/auth/google/complete
+
+Public, 10 per minute per IP. JSON `signup_token` and `role` (`farmer` or `buyer` only; anything else, or an unknown field, gives 422). Creates the account and returns 201 `AuthResult` with `status: "signed_in"`. Errors: 400 `invalid_or_expired_ticket`, 409 `google_retry`, 503 `google_unavailable`. See [Google sign in](#google-sign-in).
 
 ### POST /api/v1/auth/accept-invite
 
@@ -64,7 +76,7 @@ Public. JSON `email`. Always returns 202 with the same body.
 
 ### POST /api/v1/auth/password-reset/confirm
 
-Public. JSON `email`, `code`, `new_password`. Returns 204.
+Public. JSON `email`, `code`, `new_password`. Returns 204. Also sets `password_set` to true, which is how an account created with Google gets its first password.
 
 ### GET /api/v1/markets
 
@@ -801,7 +813,7 @@ Codes are 8 characters from `ABCDEFGHJKMNPQRSTUVWXYZ23456789`, shown in emails a
 
 ### AuthResult
 
-Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`) answers with `AuthResult`. Fields that do not apply to the `status` are omitted from the JSON. Responses carry `Cache-Control: no-store`.
+Every sign in endpoint (`POST /auth/register/verify`, `POST /auth/login`, `POST /auth/login/verify`, `POST /auth/accept-invite`, `POST /auth/google/complete`) answers with `AuthResult`; `POST /auth/google` answers with `GoogleAuthResult`, which is `AuthResult`'s `signed_in` shape plus the `role_required` status (see [Google sign in](#google-sign-in)). Fields that do not apply to the `status` are omitted from the JSON. Responses carry `Cache-Control: no-store`.
 
 Signed in:
 
@@ -856,7 +868,7 @@ The answer is always 202 with the same shape, whether or not the address has an 
 
 - New address: a pending registration is stored (hashes only) and a code valid for `REG_CODE_TTL_MINUTES` (15) is emailed. The registration itself lasts `REG_TTL_MINUTES` (60).
 - Submitting again for the same address and role: the token is rotated (the previous token stops working) and the name and password are replaced. The code is kept, and no email is sent, while it is younger than `REG_RESEND_COOLDOWN_SECONDS` (60) and valid; otherwise a new code is sent, up to `REG_MAX_SENDS` (5) emails per registration. A registration for the other role, or one that is locked or expired, is replaced by a new one.
-- Address that already has an account: nothing is stored. The account owner gets an "account exists" email (no code, no link with a secret) at most once per `REG_EXISTS_NOTICE_MINUTES` (10) per address; this throttle is kept in memory per process. The response carries a fresh token that is stored nowhere, so it can never verify.
+- Address that already has an account: nothing is stored. The account owner gets an "account exists" email (no code, no link with a secret; it also says "If you usually sign in with Google, choose Continue with Google.", which is sent to the address owner only and does not reveal whether Google is used) at most once per `REG_EXISTS_NOTICE_MINUTES` (10) per address; this throttle is kept in memory per process. The response carries a fresh token that is stored nowhere, so it can never verify.
 
 `POST /auth/register/verify` (5 per minute per IP):
 
@@ -880,7 +892,7 @@ The attempt is counted in its own committed transaction before the code is compa
 {"email": "amina@example.com", "password": "A-long-private-passw0rd"}
 ```
 
-A wrong password, an unknown email and a disabled account return the same 401, and no email is sent:
+A wrong password, an unknown email, a disabled account and an account created with Google that has no password yet (`password_set = false`; the stored random hash is still checked, so the work is the same) return the same 401, and no email is sent:
 
 ```json
 {"error": {"code": "invalid_credentials", "message": "Invalid email or password"}}
@@ -929,11 +941,84 @@ New passwords chosen through registration, change-password, invite acceptance an
 {"message": "Password changed. Log in again: your current access token is no longer accepted.", "login_required": true}
 ```
 
-`GET /auth/me` returns `UserOut`: `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `created_at` (no phone number, no password hash, no disabled-account details). Its `is_super_admin` comes from the row loaded for this request.
+`POST /auth/change-password` on an account created with Google that has not set a password returns 409 `password_not_set` ("You have not set a password yet. Use Forgot password to set one."); the reset flow below sets the first password.
+
+`GET /auth/me` returns `UserOut`: `id`, `name`, `email`, `role`, `is_super_admin`, `must_change_password`, `password_set`, `google_linked`, `created_at` (no phone number, no password hash, no disabled-account details, no Google account id). Its `is_super_admin` and `password_set` come from the row loaded for this request; `google_linked` costs one indexed query. `UserOut` is used only by this route, so no other response carries these two fields.
 
 Access tokens carry their issue time (`iat`, whole seconds). Every password change (change-password, invite acceptance, password reset, registration, the seed and recovery scripts) sets `users.password_changed_at` from the database clock, and a token whose `iat` is earlier than the whole second of `password_changed_at` gets the same 401 as any invalid token.
 
-Authentication error codes: `invalid_credentials` (401) is identical for unknown, incorrect-password and disabled accounts; `password_change_required` (403) blocks other authenticated routes until a forced password change is done; `forbidden` (403) indicates a role or super-admin failure; `rate_limited` (429) covers the IP and per email throttles; `too_many_login_codes` (429), `resend_cooldown` (429), `send_limit_reached` (409), `challenge_closed` (400) and `invalid_or_expired_code` (400) belong to the code steps; `codes_unavailable` (503) means `INVITE_CODE_PEPPER` is missing; `validation_error` (422) lists field names and safe details. On the payment route, `phone_required` (422) means the M-Pesa number is missing.
+Authentication error codes: `invalid_credentials` (401) is identical for unknown, incorrect-password and disabled accounts; `password_change_required` (403) blocks other authenticated routes until a forced password change is done; `forbidden` (403) indicates a role or super-admin failure; `rate_limited` (429) covers the IP and per email throttles; `too_many_login_codes` (429), `resend_cooldown` (429), `send_limit_reached` (409), `challenge_closed` (400) and `invalid_or_expired_code` (400) belong to the code steps; `codes_unavailable` (503) means `INVITE_CODE_PEPPER` is missing; `validation_error` (422) lists field names and safe details. Google sign in adds `google_unavailable` (503, `Retry-After: 5`), `google_sign_in_failed` (401), `google_not_allowed` (403), `google_conflict` (409), `google_retry` (409) and `invalid_or_expired_ticket` (400); `password_not_set` (409) belongs to change-password. On the payment route, `phone_required` (422) means the M-Pesa number is missing.
+
+### Google sign in
+
+Farmers and buyers may sign in with Google instead of an email, a password and a code. Administrators never use Google: no linking, no sign in, invitation only. When `GOOGLE_CLIENT_ID` is empty, all three routes answer 503 `google_unavailable` with `Retry-After: 5` and nothing else changes. The frontend sequence is in [frontend_contract.md](frontend_contract.md#google-sign-in); the Google Cloud setup is in [google-setup.md](google-setup.md).
+
+`POST /auth/google/nonce` (20 per minute per IP, no body) returns:
+
+```json
+{"nonce": "<opaque, single use; pass it to Google's initialisation>", "expires_in": 300}
+```
+
+`POST /auth/google` (10 per minute per IP):
+
+```json
+{"credential": "<the ID token from Google Identity Services>", "nonce": "<the nonce from /auth/google/nonce>"}
+```
+
+1. The ID token is verified: the header must be `alg: RS256` with a `kid` (every other algorithm is refused); the key comes from Google's published keys (`https://www.googleapis.com/oauth2/v3/certs`, cached, never another URL); the signature, `aud` (`GOOGLE_CLIENT_ID`), `exp`, `iss` (`https://accounts.google.com` or `accounts.google.com`), `sub`, a verified `email`, `azp` (when present) and `iat` (at most `GOOGLE_CLOCK_SKEW_SECONDS` in the future, at most `GOOGLE_MAX_TOKEN_AGE_SECONDS` old) are checked.
+2. The token's `nonce` claim must equal the request `nonce` (constant time compare), then the nonce is claimed in its own committed transaction (single use, unexpired). A replayed token therefore always fails.
+3. Then, by the Google subject (the stable Google account id) or the verified email:
+
+| Case | Result |
+| --- | --- |
+| The Google account is already connected to a user | 200 `signed_in` (no sign in code, whatever `LOGIN_OTP_ROLES` says) |
+| An account with the same email exists (farmer or buyer) | The Google account is connected and the user is signed in: 200 `signed_in`. The role never changes. |
+| No account has this email | 200 `role_required`; no account exists yet |
+| The account is an administrator | 403 `google_not_allowed` ("Administrator accounts sign in with email and password."); nothing is linked |
+| The account already has a different Google account connected | 409 `google_conflict` ("A different Google account is already connected to this email. Use that Google account, or sign in with your email and password.") |
+| The account is disabled, or any verification or nonce failure | 401 `google_sign_in_failed` |
+
+Every 401 has the same body, whatever the cause:
+
+```json
+{"error": {"code": "google_sign_in_failed", "message": "Google sign in did not work. Please try again or use your email and password."}}
+```
+
+Google has proven that the caller controls the email in the token, so naming the administrator and conflict cases tells the caller only about their own address; nothing about any other account is revealed. A failure to load Google's keys (with no usable cached copy) is 503 `google_unavailable`; the nonce is not used up then.
+
+`role_required` answer (the `signup_token` is returned only here; keep it in memory only):
+
+```json
+{
+	"status": "role_required",
+	"signup_token": "<opaque single use ticket>",
+	"email": "amina@example.com",
+	"name": "Amina Wanjiru",
+	"signup_expires_at": "2026-10-27T09:10:00Z"
+}
+```
+
+A ticket is valid for `GOOGLE_SIGNUP_TTL_MINUTES` (10) and is stored only as a SHA-256 digest. A new Google sign in of the same Google account replaces its open ticket. `name` is Google's name cleaned (Unicode NFKC, control characters removed, whitespace collapsed, at most 100 characters; the part of the email before `@` when empty).
+
+`POST /auth/google/complete` (10 per minute per IP):
+
+```json
+{"signup_token": "<from role_required>", "role": "farmer"}
+```
+
+`role` is `farmer` or `buyer`; `admin`, any other value or an unknown field gives 422. The ticket is claimed and the account is created in the same transaction: `email_verified_at = now()`, `password_set = false` (the password hash is the hash of a random value nobody knows), `must_change_password = false`, `is_super_admin = false`, plus the Google identity. The answer is 201 `AuthResult` with `status: "signed_in"`; the token is identical to any other access token.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 201 | | `AuthResult` with `status: "signed_in"` |
+| 400 | `invalid_or_expired_ticket` | Unknown, used, replaced or expired ticket ("Your Google sign in expired. Please try again."). Two concurrent calls with one ticket create one account; the other gets this 400. |
+| 409 | `google_retry` | An account with this email was created in the meantime. Nothing is created and the ticket is not used up ("Please try signing in with Google again."); signing in with Google again connects that account. |
+| 422 | `validation_error` | A role other than `farmer` or `buyer`, or an unknown field. |
+| 503 | `google_unavailable` | `GOOGLE_CLIENT_ID` is not set. |
+
+Accounts created with Google have no usable password: password sign in fails with the ordinary 401 and sends no email, and `POST /auth/change-password` returns 409 `password_not_set`. The owner sets a password with "Forgot password" (`POST /auth/password-reset/request` and `/confirm`), which proves control of the email and sets `password_set = true`; `GET /auth/me` shows `password_set` and `google_linked`.
+
+There is no route to disconnect Google and no route to connect a Google account from a signed in session. Connecting happens only through `POST /auth/google` with a verified email that matches the account, so disconnecting would be undone at the next Google sign in, and connecting a different Google email from a session would let a stolen access token create lasting access.
 
 ### Invites and password reset
 
@@ -955,4 +1040,4 @@ The password policy is checked first (admin rules) and a failure returns 422 `pa
 
 `POST /auth/password-reset/request` (3 per hour per IP) with `{"email": "..."}` always returns 202 `{"message": "If an account with this email exists, a reset code has been sent."}`. It covers every enabled account, since every account has an email. At most `RESET_MAX_REQUESTS_PER_HOUR` (3) codes are issued per hour and not within `INVITE_RESEND_COOLDOWN_SECONDS` of the previous one; a new code supersedes the active one and is emailed in a background task.
 
-`POST /auth/password-reset/confirm` (5 per minute per IP) with `{"email", "code", "new_password"}` returns 204. It uses the same two steps as accepting an invite (the attempt is committed first; the code locks after `RESET_MAX_ATTEMPTS` (5) wrong tries; the code is single use and expires after `RESET_CODE_TTL_MINUTES` (15)). On success the password is replaced, `must_change_password` is cleared and `password_changed_at` is set, so older tokens stop working. The user then signs in with the new password and, for the roles in `LOGIN_OTP_ROLES`, a sign in code. Every failure, including an unknown email and a disabled account, returns the same 400 `invalid_or_expired_code`. The password policy follows the account's role.
+`POST /auth/password-reset/confirm` (5 per minute per IP) with `{"email", "code", "new_password"}` returns 204. It uses the same two steps as accepting an invite (the attempt is committed first; the code locks after `RESET_MAX_ATTEMPTS` (5) wrong tries; the code is single use and expires after `RESET_CODE_TTL_MINUTES` (15)). On success the password is replaced, `password_set` becomes true (an account created with Google gets its first password this way), `must_change_password` is cleared and `password_changed_at` is set, so older tokens stop working. The user then signs in with the new password and, for the roles in `LOGIN_OTP_ROLES`, a sign in code. Every failure, including an unknown email and a disabled account, returns the same 400 `invalid_or_expired_code`. The password policy follows the account's role.

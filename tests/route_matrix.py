@@ -42,6 +42,9 @@ API_ROUTES: dict[tuple[str, str], Access] = {
     ("POST", "/api/v1/auth/login"): "public",  # obtaining a token cannot require a token
     ("POST", "/api/v1/auth/login/verify"): "public",  # second sign in step; challenge token plus emailed code
     ("POST", "/api/v1/auth/login/resend"): "public",  # second sign in step; needs a valid challenge token
+    ("POST", "/api/v1/auth/google/nonce"): "public",  # before sign in; only a hash of a random nonce is stored
+    ("POST", "/api/v1/auth/google"): "public",  # obtaining a token cannot require a token; the ID token is the check
+    ("POST", "/api/v1/auth/google/complete"): "public",  # no account exists yet; the single use ticket is the check
     ("POST", "/api/v1/auth/change-password"): ANY_ROLE,
     ("GET", "/api/v1/auth/me"): ANY_ROLE,
     ("POST", "/api/v1/auth/accept-invite"): "public",  # invitee has no account yet; the emailed code is the check

@@ -1,11 +1,13 @@
-"""An in-memory stand-in for the database behind registration and sign in.
+"""An in-memory stand-in for the database behind registration and sign in (password and Google).
 
-``AuthStore`` keeps ``users``, ``pending_registrations`` and ``login_challenges`` in dictionaries and
-answers the services' SQL by recognising the statement constants of ``registration_service`` and
-``auth_service`` (by identity, so the SQL text is never parsed), plus ORM ``select(User)`` lookups by
-id or email. It follows the database rules the services rely on: the database clock (``store.now``,
-moved with ``advance``), the one-open-row unique indexes, the unique email, the immutable used rows,
-and transactions (``commit`` keeps changes, ``rollback`` and closing a session undo uncommitted ones).
+``AuthStore`` keeps ``users``, ``pending_registrations``, ``login_challenges`` and the Google tables
+(``user_identities``, ``oauth_nonces``, ``google_signups``) in dictionaries and answers the services'
+SQL by recognising the statement constants of ``registration_service``, ``auth_service`` and
+``google_auth_service`` (by identity, so the SQL text is never parsed), plus ORM ``select(User)``
+lookups by id or email and the ``/auth/me`` identity lookup. It follows the database rules the services
+rely on: the database clock (``store.now``, moved with ``advance``), the one-open-row unique indexes,
+the unique email, the unique Google identity keys, the immutable used rows, and transactions
+(``commit`` keeps changes, ``rollback`` and closing a session undo uncommitted ones).
 
 Tests drive whole flows through the API with it: register, read the code from the fake mailer, verify,
 then call ``/auth/me`` with the returned token.
@@ -28,6 +30,7 @@ from app.core.security import hash_password
 from app.db import get_db
 from app.models.enums import UserRole
 from app.services import auth_service as auth
+from app.services import google_auth_service as google
 from app.services import registration_service as reg
 
 
@@ -43,6 +46,9 @@ class AuthStore:
         self.users: dict[UUID, SimpleNamespace] = {}
         self.pending: dict[UUID, dict[str, Any]] = {}
         self.challenges: dict[UUID, dict[str, Any]] = {}
+        self.identities: dict[UUID, dict[str, Any]] = {}
+        self.nonces: dict[UUID, dict[str, Any]] = {}
+        self.signups: dict[UUID, dict[str, Any]] = {}
         self.sessions: list[AuthSession] = []
         self.executed: list[tuple[str, dict[str, Any]]] = []
         self.commits = 0
@@ -72,6 +78,7 @@ class AuthStore:
             "email": (email or f"{role.value}-{user_id.hex[:8]}@example.com").lower(),
             "email_verified_at": self.now,
             "password_hash": password_hash or hash_password(password),
+            "password_set": True,
             "role": role,
             "is_super_admin": False,
             "must_change_password": False,
@@ -94,6 +101,31 @@ class AuthStore:
 
     def active_challenges(self, user_id: UUID) -> list[dict[str, Any]]:
         return [row for row in self.challenges.values() if row["user_id"] == user_id and row["used_at"] is None]
+
+    def add_identity(self, user: SimpleNamespace, subject: str, email: str | None = None) -> dict[str, Any]:
+        row = {
+            "id": uuid4(),
+            "user_id": user.id,
+            "provider": "google",
+            "subject": subject,
+            "email": (email or user.email).lower(),
+            "email_verified": True,
+            "name": user.name,
+            "created_at": self.now,
+            "last_login_at": None,
+        }
+        self.identities[row["id"]] = row
+        return row
+
+    def identity_of(self, user_id: UUID) -> dict[str, Any] | None:
+        return next((row for row in self.identities.values() if row["user_id"] == user_id), None)
+
+    def open_signups(self, subject: str | None = None) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self.signups.values()
+            if row["used_at"] is None and (subject is None or row["google_sub"] == subject)
+        ]
 
     def statement_names(self) -> list[str]:
         return [name for name, _ in self.executed]
@@ -152,8 +184,21 @@ class AuthSession:
             id(auth.SQL_CLAIM_CHALLENGE): self._claim_challenge,
             id(auth.SQL_FIND_CHALLENGE_FOR_RESEND): self._find_challenge_for_resend,
             id(auth.SQL_STORE_LOGIN_CODE): self._store_login_code,
+            id(google.SQL_INSERT_NONCE): self._insert_nonce,
+            id(google.SQL_CLAIM_NONCE): self._claim_nonce,
+            id(google.SQL_FIND_IDENTITY): self._find_identity,
+            id(google.SQL_TOUCH_IDENTITY): self._touch_identity,
+            id(google.SQL_FIND_USER_BY_EMAIL): self._find_user_by_email,
+            id(google.SQL_USER_HAS_GOOGLE): self._user_has_google,
+            id(google.SQL_LINK_IDENTITY): self._link_identity,
+            id(google.SQL_LOCK_SIGNUP): self._lock,
+            id(google.SQL_SUPERSEDE_SIGNUPS): self._supersede_signups,
+            id(google.SQL_INSERT_SIGNUP): self._insert_signup,
+            id(google.SQL_CLAIM_SIGNUP): self._claim_signup,
+            id(google.SQL_INSERT_GOOGLE_USER): self._insert_google_user,
+            id(google.SQL_INSERT_IDENTITY): self._insert_identity,
         }
-        self.names = {id(value): name for module in (reg, auth) for name, value in vars(module).items()}
+        self.names = {id(value): name for module in (reg, auth, google) for name, value in vars(module).items()}
 
     # Session protocol ----------------------------------------------------------------------------
 
@@ -171,6 +216,12 @@ class AuthSession:
         self.in_transaction = True
         compiled = statement.compile(dialect=postgresql.dialect())
         values = list(compiled.params.values())
+        if "user_identities" in str(compiled):
+            # GET /auth/me: does the user have a Google identity?
+            self.store.executed.append(("select_identity", {"values": values}))
+            user_id = next(value for value in values if isinstance(value, UUID))
+            row = self.store.identity_of(user_id)
+            return None if row is None else row["id"]
         self.store.executed.append(("select_user", {"values": values}))
         for value in values:
             if isinstance(value, UUID):
@@ -369,6 +420,7 @@ class AuthSession:
             email=params["email"],
             email_verified_at=now,
             password_hash=params["password_hash"],
+            password_set=True,
             role=UserRole(params["role"]),
             is_super_admin=False,
             must_change_password=False,
@@ -512,3 +564,159 @@ class AuthSession:
             send_count=row["send_count"] + 1,
         )
         return self._one(code_expires_at=row["code_expires_at"])
+
+    # Google sign in --------------------------------------------------------------------------------
+
+    def _insert_nonce(self, params: dict[str, Any]) -> FakeResult:
+        if any(row["nonce_hash"] == params["nonce_hash"] for row in self.store.nonces.values()):
+            raise unique_violation("oauth_nonces_nonce_hash_key")
+        now = self.store.now
+        row = {
+            "id": uuid4(),
+            "nonce_hash": params["nonce_hash"],
+            "created_at": now,
+            "expires_at": now + timedelta(seconds=params["ttl_seconds"]),
+            "used_at": None,
+        }
+        self._insert(self.store.nonces, row["id"], row)
+        return FakeResult()
+
+    def _claim_nonce(self, params: dict[str, Any]) -> FakeResult:
+        now = self.store.now
+        for row in self.store.nonces.values():
+            if row["nonce_hash"] == params["nonce_hash"] and row["used_at"] is None and row["expires_at"] > now:
+                self._change(row, used_at=now)
+                return self._one(id=row["id"])
+        return FakeResult()
+
+    def _identity_by_subject(self, subject: str) -> dict[str, Any] | None:
+        return next((row for row in self.store.identities.values() if row["subject"] == subject), None)
+
+    def _find_identity(self, params: dict[str, Any]) -> FakeResult:
+        row = self._identity_by_subject(params["subject"])
+        if row is None:
+            return FakeResult()
+        user = self.store.users[row["user_id"]]
+        return self._one(
+            identity_id=row["id"],
+            id=user.id,
+            role=user.role.value,
+            is_disabled=user.is_disabled,
+            is_super_admin=user.is_super_admin,
+            must_change_password=user.must_change_password,
+        )
+
+    def _touch_identity(self, params: dict[str, Any]) -> FakeResult:
+        self._change(self.store.identities[params["id"]], last_login_at=self.store.now, name=params["name"])
+        return FakeResult()
+
+    def _find_user_by_email(self, params: dict[str, Any]) -> FakeResult:
+        user = self.store.user_by_email(params["email"])
+        if user is None:
+            return FakeResult()
+        return self._one(
+            id=user.id,
+            role=user.role.value,
+            is_disabled=user.is_disabled,
+            is_super_admin=user.is_super_admin,
+            must_change_password=user.must_change_password,
+            email_verified_at=user.email_verified_at,
+        )
+
+    def _user_has_google(self, params: dict[str, Any]) -> FakeResult:
+        row = self.store.identity_of(params["user_id"])
+        return FakeResult() if row is None else self._one(id=row["id"])
+
+    def _new_identity(self, params: dict[str, Any]) -> dict[str, Any]:
+        if params["email"] != params["email"].lower():
+            raise AssertionError("check: identity email must be lower case")
+        if self.store.identity_of(params["user_id"]) is not None:
+            raise unique_violation("user_identities_user_provider_key")
+        row = {
+            "id": uuid4(),
+            "user_id": params["user_id"],
+            "provider": "google",
+            "subject": params["subject"],
+            "email": params["email"],
+            "email_verified": True,
+            "name": params["name"],
+            "created_at": self.store.now,
+            "last_login_at": self.store.now,
+        }
+        self._insert(self.store.identities, row["id"], row)
+        return row
+
+    def _link_identity(self, params: dict[str, Any]) -> FakeResult:
+        if self._identity_by_subject(params["subject"]) is not None:
+            return FakeResult()  # on conflict (provider, subject) do nothing
+        row = self._new_identity(params)
+        return self._one(user_id=row["user_id"])
+
+    def _insert_identity(self, params: dict[str, Any]) -> FakeResult:
+        if self._identity_by_subject(params["subject"]) is not None:
+            raise unique_violation("user_identities_provider_subject_key")
+        self._new_identity(params)
+        return FakeResult()
+
+    def _supersede_signups(self, params: dict[str, Any]) -> FakeResult:
+        for row in list(self.store.signups.values()):
+            if row["google_sub"] == params["subject"] and row["used_at"] is None:
+                self._change(row, used_at=self.store.now)
+        return FakeResult()
+
+    def _insert_signup(self, params: dict[str, Any]) -> FakeResult:
+        if params["email"] != params["email"].lower():
+            raise AssertionError("check: signup email must be lower case")
+        if self.store.open_signups(params["subject"]):
+            raise unique_violation("google_signups_one_open_subject_idx")
+        if any(row["token_hash"] == params["token_hash"] for row in self.store.signups.values()):
+            raise unique_violation("google_signups_token_hash_key")
+        now = self.store.now
+        row = {
+            "id": uuid4(),
+            "token_hash": params["token_hash"],
+            "google_sub": params["subject"],
+            "email": params["email"],
+            "name": params["name"],
+            "created_at": now,
+            "expires_at": now + timedelta(minutes=params["ttl_minutes"]),
+            "used_at": None,
+        }
+        self._insert(self.store.signups, row["id"], row)
+        return self._one(expires_at=row["expires_at"])
+
+    def _claim_signup(self, params: dict[str, Any]) -> FakeResult:
+        now = self.store.now
+        for row in self.store.signups.values():
+            if row["token_hash"] == params["token_hash"] and row["used_at"] is None and row["expires_at"] > now:
+                self._change(row, used_at=now)
+                return self._one(google_sub=row["google_sub"], email=row["email"], name=row["name"])
+        return FakeResult()
+
+    def _insert_google_user(self, params: dict[str, Any]) -> FakeResult:
+        if self.store.before_user_insert is not None:
+            hook, self.store.before_user_insert = self.store.before_user_insert, None
+            hook(self.store)
+        if params["role"] not in ("farmer", "buyer"):
+            raise AssertionError("a Google account must be a farmer or a buyer")
+        if self.store.user_by_email(params["email"]) is not None:
+            raise unique_violation("users_email_lower_unique_idx")
+        now = self.store.now
+        user = SimpleNamespace(
+            id=uuid4(),
+            name=params["name"],
+            email=params["email"],
+            email_verified_at=now,
+            password_hash=params["password_hash"],
+            password_set=False,
+            role=UserRole(params["role"]),
+            is_super_admin=False,
+            must_change_password=False,
+            is_disabled=False,
+            disabled_at=None,
+            password_changed_at=now,
+            created_by=None,
+            created_at=now,
+        )
+        self._insert(self.store.users, user.id, user)
+        return self._one(id=user.id, role=user.role.value, is_super_admin=False, must_change_password=False)

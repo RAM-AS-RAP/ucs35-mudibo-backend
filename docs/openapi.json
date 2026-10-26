@@ -1312,6 +1312,203 @@
         "title": "ForecastHorizon",
         "type": "string"
       },
+      "GoogleAuthResult": {
+        "description": "The answer of ``POST /auth/google``: ``signed_in`` (the ``AuthResult`` fields) or ``role_required``.\n\n``role_required`` means the Google account has no AgriSence account yet: the client asks farmer or\nbuyer once and sends the ``signup_token`` to ``POST /auth/google/complete``. Fields that do not\napply are omitted from the JSON.",
+        "properties": {
+          "access_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Token"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "expires_in": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires In"
+          },
+          "is_super_admin": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Super Admin"
+          },
+          "must_change_password": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Must Change Password"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "signup_expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signup Expires At"
+          },
+          "signup_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signup Token"
+          },
+          "status": {
+            "enum": [
+              "signed_in",
+              "role_required"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "token_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Type"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "GoogleAuthResult",
+        "type": "object"
+      },
+      "GoogleNonceOut": {
+        "description": "A single use nonce for Google's sign in initialisation; only its hash is stored.",
+        "properties": {
+          "expires_in": {
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "nonce": {
+            "title": "Nonce",
+            "type": "string"
+          }
+        },
+        "required": [
+          "nonce",
+          "expires_in"
+        ],
+        "title": "GoogleNonceOut",
+        "type": "object"
+      },
+      "GoogleSignInRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "credential": {
+            "maxLength": 8192,
+            "minLength": 20,
+            "title": "Credential",
+            "type": "string"
+          },
+          "nonce": {
+            "maxLength": 128,
+            "minLength": 20,
+            "title": "Nonce",
+            "type": "string"
+          }
+        },
+        "required": [
+          "credential",
+          "nonce"
+        ],
+        "title": "GoogleSignInRequest",
+        "type": "object"
+      },
+      "GoogleSignupRequest": {
+        "additionalProperties": false,
+        "description": "The one time role choice of a new Google account; administrators can never be created here.",
+        "properties": {
+          "role": {
+            "enum": [
+              "farmer",
+              "buyer"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "signup_token": {
+            "maxLength": 128,
+            "minLength": 16,
+            "title": "Signup Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "signup_token",
+          "role"
+        ],
+        "title": "GoogleSignupRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -2954,6 +3151,7 @@
         "type": "object"
       },
       "UserOut": {
+        "description": "``GET /auth/me``, the only response that uses this schema.",
         "properties": {
           "created_at": {
             "format": "date-time",
@@ -2963,6 +3161,10 @@
           "email": {
             "title": "Email",
             "type": "string"
+          },
+          "google_linked": {
+            "title": "Google Linked",
+            "type": "boolean"
           },
           "id": {
             "format": "uuid",
@@ -2981,6 +3183,10 @@
             "title": "Name",
             "type": "string"
           },
+          "password_set": {
+            "title": "Password Set",
+            "type": "boolean"
+          },
           "role": {
             "title": "Role",
             "type": "string"
@@ -2993,6 +3199,8 @@
           "role",
           "is_super_admin",
           "must_change_password",
+          "password_set",
+          "google_linked",
           "created_at"
         ],
         "title": "UserOut",
@@ -4335,6 +4543,109 @@
           }
         ],
         "summary": "Change Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/google": {
+      "post": {
+        "operationId": "google_sign_in_api_v1_auth_google_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleSignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleAuthResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Google Sign In",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/google/complete": {
+      "post": {
+        "operationId": "google_complete_api_v1_auth_google_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleSignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Google Complete",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/google/nonce": {
+      "post": {
+        "operationId": "google_nonce_api_v1_auth_google_nonce_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleNonceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Google Nonce",
         "tags": [
           "auth"
         ]

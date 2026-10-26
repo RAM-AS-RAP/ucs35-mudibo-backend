@@ -181,6 +181,12 @@ Admin invitations and email password resets need migration `20261016000100_admin
 
 Then install the new dependency (`python -m pip install -r requirements.txt`, which adds `aiosmtplib`), set `INVITE_CODE_PEPPER` (generate it like `JWT_SECRET` below), and configure email as described in `docs/email.md`. In development the default `EMAIL_PROVIDER=console` writes emails to `./.dev_mailbox/`. Invite admins with `POST /api/v1/admin/invites`; see `docs/admin.md`.
 
+### Google sign in migration
+
+"Continue with Google" for farmers and buyers needs migration `20261027000100_google_sign_in.sql`. It is additive and safe on a populated database: it adds `users.password_set` (true for every existing account) and the `user_identities`, `oauth_nonces` and `google_signups` tables (row level security on, no access for `anon`, `authenticated` or `pipeline_writer`), and schedules the `cleanup-google-auth` job. `supabase db reset` (local) applies it with the others; for a hosted project run `supabase db push` as above, then run `supabase/verification/google_check.sql` in the Supabase SQL Editor (rolled-back transaction, one `PASS` row per check). Apply it before starting this version of the API, because the user model now reads `password_set`.
+
+Then reinstall the requirements (`python -m pip install -r requirements.txt`; `PyJWT[crypto]` and `cryptography` verify Google's RS256 signatures), create the Google OAuth client as described in [docs/google-setup.md](docs/google-setup.md) and set `GOOGLE_CLIENT_ID`. Without it Google sign in stays off and everything else works.
+
 ## 5. Create the initial administrator (optional)
 
 After the database migrations have been applied, set `SEED_ADMIN_NAME` and `SEED_ADMIN_EMAIL` in `.env` (accounts have no phone number; `SEED_ADMIN_PHONE` is no longer read). Either set `SEED_ADMIN_PASSWORD` to a password of at least 12 characters or leave it blank to be prompted twice without echoing it. Then run once per environment:
@@ -438,6 +444,7 @@ CI (`.github/workflows/ci.yml`) runs `ruff check .` and `pytest -q -m "not db"` 
 - [docs/deployment.md](docs/deployment.md): deployment checklist.
 - [docs/ci.md](docs/ci.md): what the CI pipeline checks.
 - [docs/identity-v2-cutover.md](docs/identity-v2-cutover.md): moving a project to email only accounts (wipes the data; the exact steps).
+- [docs/google-setup.md](docs/google-setup.md): creating the Google OAuth client for "Continue with Google".
 - [docs/decisions.md](docs/decisions.md), [docs/schema.md](docs/schema.md), [docs/payments.md](docs/payments.md), [docs/admin.md](docs/admin.md), [docs/email.md](docs/email.md).
 
 ## Implemented scope
@@ -483,6 +490,12 @@ Before deploying, run `python scripts/check_config.py` in the target environment
 | `REG_MAX_SENDS` | Registration codes sent per registration, 1 to 5 (default 5). |
 | `REG_RESEND_COOLDOWN_SECONDS` | Gap between registration code emails, 10 to 3600 (default 60). |
 | `REG_EXISTS_NOTICE_MINUTES` | Minimum gap between "account exists" emails for one address, per process, 1 to 1440 (default 10). |
+| `GOOGLE_CLIENT_ID` | Google OAuth Web client ID for "Continue with Google" (farmers and buyers), ending with `.apps.googleusercontent.com`. Empty (the default) turns Google sign in off: its routes answer 503 `google_unavailable`. See [docs/google-setup.md](docs/google-setup.md). |
+| `GOOGLE_NONCE_TTL_SECONDS` | Lifetime of a Google sign in nonce, 60 to 900 (default 300). |
+| `GOOGLE_SIGNUP_TTL_MINUTES` | Lifetime of the ticket that waits for a new Google user's role choice, 2 to 30 (default 10). |
+| `GOOGLE_JWKS_CACHE_SECONDS` | How long Google's signing keys are cached (a shorter `Cache-Control: max-age` wins), 60 to 86400 (default 3600). |
+| `GOOGLE_CLOCK_SKEW_SECONDS` | Clock skew allowed when checking Google ID token times, 0 to 300 (default 60). |
+| `GOOGLE_MAX_TOKEN_AGE_SECONDS` | Oldest accepted Google ID token (`iat`), 60 to 3600 (default 900). |
 | `MPESA_ENV` | Must remain `sandbox`. |
 | `MPESA_BASE_URL` | Must remain `https://sandbox.safaricom.co.ke`. |
 | `MPESA_CONSUMER_KEY` / `MPESA_CONSUMER_SECRET` | Daraja sandbox OAuth credentials. |

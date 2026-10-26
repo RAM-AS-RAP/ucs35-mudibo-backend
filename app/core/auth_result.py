@@ -19,6 +19,7 @@ from app.core.security import create_access_token
 
 SIGNED_IN = "signed_in"
 CODE_REQUIRED = "code_required"
+ROLE_REQUIRED = "role_required"
 
 
 class AuthResult(BaseModel):
@@ -56,6 +57,44 @@ def signed_in_result(user: Any) -> AuthResult:
         role=role_value,
         must_change_password=bool(_field(user, "must_change_password")),
         is_super_admin=bool(_field(user, "is_super_admin")),
+    )
+
+
+class GoogleAuthResult(BaseModel):
+    """The answer of ``POST /auth/google``: ``signed_in`` (the ``AuthResult`` fields) or ``role_required``.
+
+    ``role_required`` means the Google account has no AgriSence account yet: the client asks farmer or
+    buyer once and sends the ``signup_token`` to ``POST /auth/google/complete``. Fields that do not
+    apply are omitted from the JSON.
+    """
+
+    status: Literal["signed_in", "role_required"]
+    # signed_in
+    access_token: str | None = None
+    token_type: str | None = None
+    expires_in: int | None = None
+    role: str | None = None
+    must_change_password: bool | None = None
+    is_super_admin: bool | None = None
+    # role_required
+    signup_token: str | None = None
+    email: str | None = None
+    name: str | None = None
+    signup_expires_at: datetime | None = None
+
+
+def google_signed_in_result(user: Any) -> GoogleAuthResult:
+    """The same access token and fields as a password sign in, with no code step."""
+    return GoogleAuthResult(**signed_in_result(user).model_dump(exclude_none=True))
+
+
+def role_required_result(*, signup_token: str, email: str, name: str, signup_expires_at: datetime) -> GoogleAuthResult:
+    return GoogleAuthResult(
+        status=ROLE_REQUIRED,
+        signup_token=signup_token,
+        email=email,
+        name=name,
+        signup_expires_at=signup_expires_at,
     )
 
 

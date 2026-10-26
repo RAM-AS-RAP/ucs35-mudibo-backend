@@ -1,7 +1,9 @@
 """User account table mapping.
 
 An account is identified only by its verified, lower case email address. ``email`` and
-``email_verified_at`` never change once written (a database trigger rejects it).
+``email_verified_at`` never change once written (a database trigger rejects it). ``password_set`` is
+false only for an account created through Google sign in, until a password is set with the reset flow;
+a database trigger refuses to change it from true back to false.
 """
 
 from datetime import datetime
@@ -24,6 +26,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, nullable=False)
     email_verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_set: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     role: Mapped[UserRole] = mapped_column(user_role_type, nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

@@ -41,6 +41,9 @@ _SENSITIVE_FIELDS = {
     "challenge_token",
     "email",
     "phone_number",
+    "credential",
+    "nonce",
+    "signup_token",
 }
 
 # SQLSTATE values that mean "try again shortly": lock timeout, deadlock, serialization failure.
@@ -96,7 +99,7 @@ class AppError(ServiceError):
         self.code = code
         self.reason = reason
         self.extra = dict(extra or {})
-        # Seconds for the Retry-After header of a 429; None uses the default for the code.
+        # Seconds for the Retry-After header of a 429 (None uses the default for the code) or a 503.
         self.retry_after = retry_after
 
 
@@ -240,6 +243,8 @@ def install_error_handlers(app: FastAPI) -> None:
         headers = {}
         if exc.status_code == 429:
             headers["Retry-After"] = str(_service_retry_after(exc))
+        elif exc.status_code == 503 and isinstance(getattr(exc, "retry_after", None), int) and exc.retry_after >= 1:
+            headers["Retry-After"] = str(exc.retry_after)
         return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
 
     @app.exception_handler(NotImplementedError)

@@ -7,7 +7,8 @@ as invite acceptance: the attempt is counted in its own committed transaction (l
 Every failure, a disabled account and an unknown email return the same 400 ``invalid_or_expired_code``.
 
 A reset revokes every earlier access token (``password_changed_at``); the next sign in needs the new
-password and, for the roles in ``LOGIN_OTP_ROLES``, an emailed sign in code.
+password and, for the roles in ``LOGIN_OTP_ROLES``, an emailed sign in code. A reset also sets
+``password_set = true``: it is how an account created with Google gets its first password.
 """
 
 from __future__ import annotations
@@ -137,7 +138,8 @@ async def confirm_reset(session: AsyncSession, body: PasswordResetConfirmRequest
     result = await session.execute(
         text(
             "update public.users"
-            "   set password_hash = :password_hash, must_change_password = false, password_changed_at = now()"
+            "   set password_hash = :password_hash, password_set = true, must_change_password = false,"
+            "       password_changed_at = now()"
             " where id = :user_id and is_disabled = false"
             " returning id"
         ),
