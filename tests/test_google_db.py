@@ -139,7 +139,9 @@ async def test_identity_constraints(db_session: AsyncSession) -> None:
     # The same subject for another user.
     await expect_database_error(db_session, insert, {**theirs, "subject": subject})
     # Upper case email, email_verified false, another provider.
-    await expect_database_error(db_session, insert, {**theirs, "subject": random_subject(), "email": "Upper@Example.com"})
+    await expect_database_error(
+        db_session, insert, {**theirs, "subject": random_subject(), "email": "Upper@Example.com"}
+    )
     await expect_database_error(db_session, insert, {**theirs, "subject": random_subject(), "verified": False})
     await expect_database_error(db_session, insert, {**theirs, "subject": random_subject(), "provider": "github"})
     # The valid identity for the other user is accepted.
@@ -296,7 +298,12 @@ async def test_a_new_google_user_end_to_end(db_session: AsyncSession) -> None:
             populate_existing=True
         )
     )
-    assert (user.email, user.role, user.password_set, user.must_change_password) == (email, UserRole.BUYER, False, False)
+    assert (user.email, user.role, user.password_set, user.must_change_password) == (
+        email,
+        UserRole.BUYER,
+        False,
+        False,
+    )
     assert user.email_verified_at is not None and user.password_changed_at is not None
     assert await google_auth_service.is_google_linked(db_session, user.id)
     with pytest.raises(AppError) as exc_info:

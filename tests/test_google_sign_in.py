@@ -45,7 +45,15 @@ CONFLICT = {
 RETRY = {"error": {"code": "google_retry", "message": "Please try signing in with Google again."}}
 TICKET = {"error": {"code": "invalid_or_expired_ticket", "message": "Your Google sign in expired. Please try again."}}
 INVALID_CREDENTIALS = {"error": {"code": "invalid_credentials", "message": "Invalid email or password"}}
-SIGNED_IN_KEYS = {"status", "access_token", "token_type", "expires_in", "role", "must_change_password", "is_super_admin"}
+SIGNED_IN_KEYS = {
+    "status",
+    "access_token",
+    "token_type",
+    "expires_in",
+    "role",
+    "must_change_password",
+    "is_super_admin",
+}
 ROLE_REQUIRED_KEYS = {"status", "signup_token", "email", "name", "signup_expires_at"}
 GOOGLE_SENTENCE = "If you usually sign in with Google, choose Continue with Google."
 NEW_EMAIL = "new.person@example.com"
