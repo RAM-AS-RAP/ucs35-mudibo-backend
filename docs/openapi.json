@@ -2974,6 +2974,15 @@
         "title": "StatsOut",
         "type": "object"
       },
+      "TrendMonths": {
+        "description": "Trend windows offered to clients.",
+        "enum": [
+          6,
+          12
+        ],
+        "title": "TrendMonths",
+        "type": "integer"
+      },
       "UserAdminOut": {
         "properties": {
           "created_at": {
@@ -6186,11 +6195,8 @@
             "name": "months",
             "required": false,
             "schema": {
-              "default": 24,
-              "maximum": 60,
-              "minimum": 1,
-              "title": "Months",
-              "type": "integer"
+              "$ref": "#/components/schemas/TrendMonths",
+              "default": 12
             }
           }
         ],

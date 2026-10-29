@@ -63,9 +63,9 @@ async def test_current_prices_rejects_unsupported_crops_before_service_call(api_
 @pytest.mark.parametrize(
     ("market", "crop", "months", "expected_market", "expected_crop", "expected_months"),
     [
-        ("nairobi", "MAIZE", None, "Nairobi", CropType.MAIZE, 24),
+        ("nairobi", "MAIZE", None, "Nairobi", CropType.MAIZE, 12),
         ("NAKURU", "beans", "6", "Nakuru", CropType.BEANS, 6),
-        ("mOmBaSa", "MaIzE", "1", "Mombasa", CropType.MAIZE, 1),
+        ("mOmBaSa", "MaIzE", "6", "Mombasa", CropType.MAIZE, 6),
         (" Kisumu ", "BEANS", "12", "Kisumu", CropType.BEANS, 12),
     ],
 )
@@ -101,6 +101,8 @@ async def test_price_trends_normalizes_supported_query_values(
         {"market": "Nairobi", "crop": "sorghum"},
         {"market": "Nairobi", "crop": "maize", "months": "0"},
         {"market": "Nairobi", "crop": "maize", "months": "61"},
+        {"market": "Nairobi", "crop": "maize", "months": "1"},
+        {"market": "Nairobi", "crop": "maize", "months": "24"},
     ],
 )
 async def test_price_trends_rejects_unsupported_values_before_service_call(
