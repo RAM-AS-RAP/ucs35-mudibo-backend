@@ -13,7 +13,7 @@ from app.schemas.market import (
     PricePoint,
     PriceTrend,
 )
-from app.services.market_service import current_month_nairobi, require_available_market
+from app.services.market_service import require_available_market
 
 
 def _month_offset(month: date, months_back: int) -> date:
@@ -85,10 +85,24 @@ async def current_prices(session: AsyncSession, crop: str) -> CurrentPricesRespo
 
 
 async def price_trends(session: AsyncSession, market: str, crop: str, months: int) -> PriceTrend:
-    """Return available observations in the trailing Nairobi calendar-month window."""
+    """Return observations in the `months` calendar months ending at the newest published month.
+
+    The window counts back from the series' latest price month, not from today, because FEWS NET
+    publishes with a lag. Missing months inside the window stay absent.
+    """
     canonical_market = await require_available_market(session, market)
-    current_month = current_month_nairobi()
-    first_month = _month_offset(current_month, months - 1)
+    latest_month = await session.scalar(
+        text("""
+            SELECT max(month) AS latest_month
+            FROM market_prices
+            WHERE market = :market
+              AND crop = :crop
+        """),
+        {"market": canonical_market, "crop": crop},
+    )
+    if latest_month is None:
+        return PriceTrend(market=canonical_market, crop=crop, points=[], first_month=None, last_month=None, count=0)
+    first_month = _month_offset(latest_month, months - 1)
     result = await session.execute(
         text("""
             SELECT month, avg_price_per_kg, source
@@ -96,14 +110,14 @@ async def price_trends(session: AsyncSession, market: str, crop: str, months: in
             WHERE market = :market
               AND crop = :crop
               AND month >= :first_month
-              AND month <= :current_month
+              AND month <= :latest_month
             ORDER BY month ASC
         """),
         {
             "market": canonical_market,
             "crop": crop,
             "first_month": first_month,
-            "current_month": current_month,
+            "latest_month": latest_month,
         },
     )
     points = [PricePoint(**dict(row)) for row in result.mappings().all()]
