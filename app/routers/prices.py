@@ -1,5 +1,7 @@
 """Observed market price routes."""
 
+from enum import IntEnum
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +10,14 @@ from app.db import get_db
 from app.models.enums import UserRole
 from app.schemas.market import CropQuery, CurrentPricesResponse, MarketQuery, PriceTrend
 from app.services import price_service
+
+
+class TrendMonths(IntEnum):
+    """Trend windows offered to clients."""
+
+    SIX = 6
+    TWELVE = 12
+
 
 router = APIRouter(
     prefix="/prices",
@@ -25,7 +35,7 @@ async def current_prices(crop: CropQuery, session: AsyncSession = Depends(get_db
 async def price_trends(
     market: MarketQuery,
     crop: CropQuery,
-    months: int = Query(default=24, ge=1, le=60),
+    months: TrendMonths = Query(default=TrendMonths.TWELVE),
     session: AsyncSession = Depends(get_db),
 ) -> PriceTrend:
-    return await price_service.price_trends(session, market, crop.value, months)
+    return await price_service.price_trends(session, market, crop.value, int(months))
