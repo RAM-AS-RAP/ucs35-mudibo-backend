@@ -128,26 +128,42 @@ async def test_current_prices_returns_empty_items_when_crop_has_no_rows():
 
 
 @pytest.mark.asyncio
-async def test_price_trends_uses_nairobi_window_and_preserves_gaps(monkeypatch):
-    monkeypatch.setattr(price_service, "current_month_nairobi", lambda: date(2026, 10, 1))
+@pytest.mark.parametrize(
+    ("months", "expected_first_month"),
+    [(6, date(2026, 3, 1)), (12, date(2025, 9, 1))],
+)
+async def test_price_trends_counts_back_from_latest_published_month_and_preserves_gaps(months, expected_first_month):
     session = FakeSession(
         [
             FakeResult([("Nairobi",), ("Kisumu",)]),
             FakeResult(
                 [
-                    {"month": date(2026, 8, 1), "avg_price_per_kg": Decimal("101.25"), "source": "fews"},
-                    {"month": date(2026, 10, 1), "avg_price_per_kg": Decimal("104.00"), "source": "fews"},
+                    {"month": date(2026, 6, 1), "avg_price_per_kg": Decimal("101.25"), "source": "fews"},
+                    {"month": date(2026, 8, 1), "avg_price_per_kg": Decimal("104.00"), "source": "fews"},
                 ]
             ),
-        ]
+        ],
+        scalars=[date(2026, 8, 1)],
     )
-    response = await price_service.price_trends(session, " nairobi ", "maize", 3)
+    response = await price_service.price_trends(session, " nairobi ", "maize", months)
     assert response.market == "Nairobi"
-    assert [point.month for point in response.points] == [date(2026, 8, 1), date(2026, 10, 1)]
-    assert response.first_month == date(2026, 8, 1)
-    assert response.last_month == date(2026, 10, 1)
+    assert [point.month for point in response.points] == [date(2026, 6, 1), date(2026, 8, 1)]
+    assert response.first_month == date(2026, 6, 1)
+    assert response.last_month == date(2026, 8, 1)
     assert response.count == 2
-    assert session.parameters[1]["first_month"] == date(2026, 8, 1)
+    assert session.parameters[1] == {"market": "Nairobi", "crop": "maize"}
+    assert session.parameters[2]["first_month"] == expected_first_month
+    assert session.parameters[2]["latest_month"] == date(2026, 8, 1)
+
+
+@pytest.mark.asyncio
+async def test_price_trends_returns_empty_series_when_crop_has_no_prices():
+    session = FakeSession([FakeResult([("Nairobi",), ("Kisumu",)])], scalars=[None])
+    response = await price_service.price_trends(session, "Kisumu", "beans", 6)
+    assert response.points == []
+    assert response.count == 0
+    assert response.first_month is None
+    assert len(session.statements) == 2
 
 
 def test_current_month_uses_africa_nairobi_timezone() -> None:

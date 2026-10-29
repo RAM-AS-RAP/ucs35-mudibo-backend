@@ -88,7 +88,7 @@ Farmer, admin. `crop=maize` or `crop=beans`. Returns `{items, as_of_note}`. Each
 
 ### GET /api/v1/prices/trends
 
-Farmer, admin. Available `market`, `crop`, `months` (`6` or `12`, default 12; any other value returns 422). Returns the last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market.
+Farmer, admin. Available `market`, `crop`, `months` (`6` or `12`, default 12; any other value returns 422). Returns the `months` calendar months ending at the newest published month for that market and crop (not the current month, since FEWS NET publishes with a lag), in ascending order; missing months are absent, and a crop with no prices returns an empty `points` list. 404 `market_not_available` if no price data exists for that market.
 
 ### GET /api/v1/forecasts
 
