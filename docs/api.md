@@ -88,7 +88,7 @@ Farmer, admin. `crop=maize` or `crop=beans`. Returns `{items, as_of_note}`. Each
 
 ### GET /api/v1/prices/trends
 
-Farmer, admin. Available `market`, `crop`, `months` (1-60, default 24). Returns the last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market.
+Farmer, admin. Available `market`, `crop`, `months` (`6` or `12`, default 12; any other value returns 422). Returns the last `months` calendar months in ascending order; missing months are absent. 404 `market_not_available` if no price data exists for that market.
 
 ### GET /api/v1/forecasts
 
@@ -296,7 +296,7 @@ Errors use `{"error":{"code":"...","message":"...","request_id":"..."}}`; foreca
 }
 ```
 
-`GET /prices/trends?market=Nairobi&crop=maize&months=24` returns `{market, crop, points, first_month, last_month, count}`. Each point contains `month`, `avg_price_per_kg`, and `source`; absent months remain absent.
+`GET /prices/trends?market=Nairobi&crop=maize&months=12` returns `{market, crop, points, first_month, last_month, count}`. Each point contains `month`, `avg_price_per_kg`, and `source`; absent months remain absent.
 
 ```json
 {
